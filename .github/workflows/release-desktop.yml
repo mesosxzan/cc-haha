@@ -13,7 +13,7 @@ on:
       notarize_macos:
         description: 'Notarize macOS artifacts'
         required: false
-        default: true
+        default: false
         type: boolean
       macos_signing:
         description: 'Enable macOS signing & signing secrets validation'
