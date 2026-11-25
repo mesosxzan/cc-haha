@@ -202,6 +202,22 @@ describe('buildModelsUrlCandidates', () => {
     ).toEqual(['https://api.example.com/v1/models'])
   })
 
+  test('OpenAI formats probe the base as-is first, keeping /v1 only as a fallback', () => {
+    for (const apiFormat of ['openai_chat', 'openai_responses'] as const) {
+      expect(buildModelsUrlCandidates('https://api.example.com', { apiFormat })).toEqual([
+        'https://api.example.com/models',
+        'https://api.example.com/v1/models',
+      ])
+      expect(buildModelsUrlCandidates('https://api.example.com/v1', { apiFormat })).toEqual([
+        'https://api.example.com/v1/models',
+      ])
+      expect(buildModelsUrlCandidates('https://gateway.example.com/api/v3/tenant', { apiFormat })).toEqual([
+        'https://gateway.example.com/api/v3/tenant/models',
+        'https://gateway.example.com/api/v3/tenant/v1/models',
+      ])
+    }
+  })
+
   test('derives Gemini /v1beta/models candidates from bare, versioned, and /models roots', () => {
     expect(buildModelsUrlCandidates('https://generativelanguage.googleapis.com', { apiFormat: 'gemini' })).toEqual([
       'https://generativelanguage.googleapis.com/v1beta/models',

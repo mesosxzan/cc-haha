@@ -306,7 +306,7 @@ describe('proxy network settings', () => {
       const res = await handleProxyRequest(req, new URL(req.url))
 
       expect(res.status).toBe(200)
-      expect(calls.map((call) => call.url)).toEqual(['https://api.example.com/v1/chat/completions'])
+      expect(calls.map((call) => call.url)).toEqual(['https://api.example.com/chat/completions'])
       expect(calls.map((call) => call.proxy)).toEqual([undefined])
     } finally {
       globalThis.fetch = originalFetch
@@ -388,7 +388,7 @@ describe('proxy network settings', () => {
       const res = await handleProxyRequest(req, new URL(req.url))
 
       expect(res.status).toBe(200)
-      expect(calls.map((call) => call.url)).toEqual(['http://127.0.0.1:11434/v1/chat/completions'])
+      expect(calls.map((call) => call.url)).toEqual(['http://127.0.0.1:11434/chat/completions'])
       expect(calls.map((call) => call.proxy)).toEqual([undefined])
     } finally {
       globalThis.fetch = originalFetch

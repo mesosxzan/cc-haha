@@ -3,17 +3,21 @@ import { buildOpenaiEndpoint } from './openaiEndpoint.js'
 
 describe('buildOpenaiEndpoint', () => {
   for (const endpoint of ['chat/completions', 'responses'] as const) {
-    for (const suffix of ['', '/', '/v1', '/v1/']) {
-      test(`${endpoint} accepts a gateway base ending in ${suffix || '(host)'}`, () => {
-        expect(buildOpenaiEndpoint(`https://gw.apismart.ai${suffix}`, endpoint))
-          .toBe(`https://gw.apismart.ai/v1/${endpoint}`)
+    for (const [base, expected] of [
+      ['https://gw.apismart.ai', 'https://gw.apismart.ai'],
+      ['https://gw.apismart.ai/', 'https://gw.apismart.ai'],
+      ['https://gw.apismart.ai/v1', 'https://gw.apismart.ai/v1'],
+      ['https://gw.apismart.ai/v1/', 'https://gw.apismart.ai/v1'],
+    ] as const) {
+      test(`${endpoint} appends the action to ${base} without inserting a version`, () => {
+        expect(buildOpenaiEndpoint(base, endpoint)).toBe(`${expected}/${endpoint}`)
       })
     }
     test(`${endpoint} preserves gateway path prefixes`, () => {
       expect(buildOpenaiEndpoint('https://example.com/api/v1/', endpoint))
         .toBe(`https://example.com/api/v1/${endpoint}`)
       expect(buildOpenaiEndpoint('https://example.com/api', endpoint))
-        .toBe(`https://example.com/api/v1/${endpoint}`)
+        .toBe(`https://example.com/api/${endpoint}`)
     })
     // #1816: gateways that version their own root serve OpenAI routes directly under it
     // (Volcengine Ark /api/v3 and /api/coding/v3, Zhipu /api/paas/v4).
@@ -27,17 +31,19 @@ describe('buildOpenaiEndpoint', () => {
         expect(buildOpenaiEndpoint(`${base}//`, endpoint)).toBe(`${base}/${endpoint}`)
       })
     }
-    test(`${endpoint} still adds /v1 to bare gateway roots`, () => {
+    // The user-entered base is the complete base: bare roots and non-standard
+    // paths get only the action suffix, never an inserted /v1.
+    test(`${endpoint} uses bare gateway roots as-is`, () => {
       expect(buildOpenaiEndpoint('https://api.atlascloud.ai', endpoint))
-        .toBe(`https://api.atlascloud.ai/v1/${endpoint}`)
+        .toBe(`https://api.atlascloud.ai/${endpoint}`)
       expect(buildOpenaiEndpoint('http://localhost:11434/', endpoint))
-        .toBe(`http://localhost:11434/v1/${endpoint}`)
+        .toBe(`http://localhost:11434/${endpoint}`)
     })
-    test(`${endpoint} only treats a plain numeric last segment as a version`, () => {
+    test(`${endpoint} uses non-standard base paths as-is`, () => {
       expect(buildOpenaiEndpoint('https://example.com/v1beta', endpoint))
-        .toBe(`https://example.com/v1beta/v1/${endpoint}`)
+        .toBe(`https://example.com/v1beta/${endpoint}`)
       expect(buildOpenaiEndpoint('https://example.com/api/v3/tenant', endpoint))
-        .toBe(`https://example.com/api/v3/tenant/v1/${endpoint}`)
+        .toBe(`https://example.com/api/v3/tenant/${endpoint}`)
     })
   }
 

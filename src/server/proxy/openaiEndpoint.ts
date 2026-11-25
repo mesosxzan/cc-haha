@@ -1,7 +1,6 @@
-// A base whose last segment is already an API version (OpenAI-style /v1, Volcengine
-// Ark's /api/v3, Zhipu's /api/paas/v4) serves the endpoints directly under it, the
-// way OpenAI SDK clients treat base_url. Only bare gateway roots get the
-// conventional /v1. Matches the /models probe rule in providerModelCatalog.
+// Non-Azure bases are used as-is: the user-entered URL is the complete base and
+// only the action suffix (/chat/completions, /responses) is appended. A version
+// segment such as /v1 must be part of the base itself; nothing is auto-inserted.
 const VERSIONED_BASE_RE = /\/v\d+$/
 const AZURE_OPENAI_HOST_RE = /\.(?:openai\.azure\.com|cognitiveservices\.azure\.com|services\.ai\.azure\.com)$/i
 const AZURE_DEPLOYMENTS_PATH_RE = /\/openai\/deployments\/[^/]+$/i
@@ -64,7 +63,7 @@ export function buildOpenaiEndpoint(
 
   if (!parsed) {
     const base = trimmed.replace(/\/+$/, '')
-    return `${VERSIONED_BASE_RE.test(base) ? base : `${base}/v1`}/${endpoint}`
+    return `${base}/${endpoint}`
   }
 
   const rawPathname = parsed.pathname.replace(/\/+$/, '')
@@ -126,6 +125,6 @@ export function buildOpenaiEndpoint(
     return parsed.toString()
   }
 
-  parsed.pathname = `${VERSIONED_BASE_RE.test(rawPathname) ? rawPathname : `${rawPathname}/v1`}/${endpoint}`
+  parsed.pathname = `${rawPathname}/${endpoint}`
   return parsed.toString()
 }

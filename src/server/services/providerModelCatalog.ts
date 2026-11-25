@@ -150,6 +150,7 @@ export function buildModelsUrlCandidates(
   const isVertex = options?.apiFormat === 'google_vertex' || (isGemini && isVertexEndpointUrl(trimmed))
   const isBedrock = options?.apiFormat === 'bedrock_converse'
   const isAzure = options?.apiFormat === 'azure_openai' || isAzureOpenaiEndpoint(trimmed)
+  const isOpenai = options?.apiFormat === 'openai_chat' || options?.apiFormat === 'openai_responses'
 
   if (isBedrock) {
     candidates.push(...buildBedrockModelsEndpoints(trimmed))
@@ -177,6 +178,12 @@ export function buildModelsUrlCandidates(
     }
   } else if (isGemini) {
     candidates.push(`${trimmed}/v1beta/models`)
+    candidates.push(`${trimmed}/v1/models`)
+  } else if (isOpenai) {
+    // OpenAI formats treat the base as complete (chat appends only the action
+    // suffix), so probe the catalog directly under it. /v1 stays as a fallback
+    // for users migrating a bare root that used to be auto-expanded.
+    candidates.push(`${trimmed}/models`)
     candidates.push(`${trimmed}/v1/models`)
   } else {
     candidates.push(`${trimmed}/v1/models`)

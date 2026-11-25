@@ -311,8 +311,8 @@ describe('active sponsor providers', () => {
     fireEvent.click(await screen.findByRole('option', { name: /OpenAI Chat Completions/ }))
 
     expect(dialog.getByText(/point the base URL at an endpoint that serves it/)).toBeInTheDocument()
-    // OpenAI protocols need the full versioned path, so the untouched preset
-    // default is cleared for the user to fill instead of being carried over.
+    // OpenAI protocols use the base as-is, so the untouched Anthropic preset
+    // default is cleared for the user to fill the right base instead.
     expect(dialog.queryByDisplayValue('https://agent.aruhub.com')).not.toBeInTheDocument()
     const baseUrlInput = dialog.getByRole('textbox', { name: /^Base URL/ })
     expect(baseUrlInput).toHaveValue('')
@@ -419,27 +419,45 @@ describe('OpenAI protocol base URL guidance', () => {
   it('keeps the endpoint of an OpenAI-native preset when switching between OpenAI protocols', async () => {
     const dialog = await openAddDialog()
     fireEvent.click(dialog.getByRole('button', { name: 'Atlas Cloud' }))
-    expect(dialog.getByDisplayValue('https://api.atlascloud.ai')).toBeInTheDocument()
+    expect(dialog.getByDisplayValue('https://api.atlascloud.ai/v1')).toBeInTheDocument()
 
     await pickApiFormat(dialog, /OpenAI Chat Completions \(proxy\)/, /OpenAI Responses API/)
 
-    expect(dialog.getByDisplayValue('https://api.atlascloud.ai')).toBeInTheDocument()
+    expect(dialog.getByDisplayValue('https://api.atlascloud.ai/v1')).toBeInTheDocument()
   })
 
-  it('shows the full-path placeholder and hint only for OpenAI protocols', async () => {
+  it('shows the as-is base placeholder and hint only for OpenAI protocols', async () => {
     const dialog = await openAddDialog()
     fireEvent.click(dialog.getByRole('button', { name: 'Custom API' }))
     const baseUrlInput = dialog.getByRole('textbox', { name: /^Base URL/ })
     expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/anthropic')
-    expect(dialog.queryByText(/is not appended automatically/)).not.toBeInTheDocument()
+    expect(dialog.queryByText(/The base URL is used exactly as entered/)).not.toBeInTheDocument()
 
     await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Chat Completions/)
     expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/v1')
-    expect(dialog.getByText(/Enter the full endpoint URL, e\.g\. https:\/\/api\.example\.com\/v1/)).toBeInTheDocument()
+    expect(dialog.getByText(/The base URL is used exactly as entered/)).toBeInTheDocument()
+    expect(dialog.getByText(/never \/v1/)).toBeInTheDocument()
 
     await pickApiFormat(dialog, /OpenAI Chat Completions \(proxy\)/, /Anthropic Messages/)
     expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/anthropic')
-    expect(dialog.queryByText(/is not appended automatically/)).not.toBeInTheDocument()
+    expect(dialog.queryByText(/The base URL is used exactly as entered/)).not.toBeInTheDocument()
+  })
+
+  it('tells the model probe the OpenAI protocol so the base is probed as-is', async () => {
+    const fetchModels = vi.spyOn(providersApi, 'fetchModels').mockResolvedValue({
+      ok: true,
+      endpoint: 'https://my.gateway.dev/models',
+      models: [{ id: 'gpt-fixture' }],
+    })
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Custom API' }))
+    await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Chat Completions/)
+    fireEvent.change(dialog.getByRole('textbox', { name: /^Base URL/ }), { target: { value: 'https://my.gateway.dev' } })
+    fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-openai-key' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Fetch models' }))
+    await waitFor(() => expect(fetchModels).toHaveBeenCalledWith({
+      baseUrl: 'https://my.gateway.dev', apiKey: 'fake-openai-key', apiFormat: 'openai_chat',
+    }))
   })
 
   it('keeps the cleared endpoint out of the settings JSON draft', async () => {

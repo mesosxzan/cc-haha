@@ -318,7 +318,7 @@
   {
     "id": "atlascloud",
     "name": "Atlas Cloud",
-    "baseUrl": "https://api.atlascloud.ai",
+    "baseUrl": "https://api.atlascloud.ai/v1",
     "apiFormat": "openai_chat",
     "defaultModels": {
       "main": "deepseek-ai/deepseek-v4-pro",

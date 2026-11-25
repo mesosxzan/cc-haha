@@ -99,11 +99,23 @@ async function scenarioContext(ctx: LiveContext, scenario: ReplayScenario, upstr
   }
 }
 
+/**
+ * OpenAI-format bases are used as-is (no /v1 is inserted), while cassettes and
+ * the recorder capture CLI-proxy paths that already start with /v1. Registering
+ * the loopback server with a /v1 base keeps the request paths identical to what
+ * was recorded.
+ */
+function providerUrlFor(upstreamUrl: string, config: Record<string, unknown>): string {
+  return config.apiFormat === 'openai_chat' || config.apiFormat === 'openai_responses'
+    ? `${upstreamUrl.replace(/\/+$/, '')}/v1`
+    : upstreamUrl
+}
+
 async function registerProvider(baseUrl: string, upstreamUrl: string, name: string, config: Record<string, unknown>) {
   const response = await fetch(`${baseUrl}/api/providers`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...config, name, apiKey: 'replay-fake-key', baseUrl: upstreamUrl }),
+    body: JSON.stringify({ ...config, name, apiKey: 'replay-fake-key', baseUrl: providerUrlFor(upstreamUrl, config) }),
   })
   if (!response.ok) throw new Error(`registering ${name} failed: ${response.status} ${await response.text()}`)
   const body = await response.json() as { provider?: { id?: string }; id?: string }

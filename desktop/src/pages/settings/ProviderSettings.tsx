@@ -1999,7 +1999,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
       const result = await fetchModels({
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
-        ...((apiFormat === 'gemini' || apiFormat === 'google_vertex' || apiFormat === 'bedrock_converse' || apiFormat === 'azure_openai') && { apiFormat }),
+        ...((isOpenaiApiFormat(apiFormat) || apiFormat === 'gemini' || apiFormat === 'google_vertex' || apiFormat === 'bedrock_converse' || apiFormat === 'azure_openai') && { apiFormat }),
         ...(probeProxy && { proxy: probeProxy }),
       })
       // The form moved on while we were probing — this answer describes a base

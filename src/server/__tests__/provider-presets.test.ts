@@ -300,7 +300,8 @@ describe('provider presets API', () => {
     expect(shengsuanyun?.defaultModels.main).toBe('anthropic/claude-sonnet-4.6')
     expect(shengsuanyun?.defaultModels.haiku).toBe('anthropic/claude-haiku-4.5:thinking')
     expect(shengsuanyun?.modelContextWindows?.['anthropic/claude-sonnet-4.6']).toBe(1000000)
-    expect(atlascloud?.baseUrl).toBe('https://api.atlascloud.ai')
+    // OpenAI-format bases are used as-is, so the preset must carry /v1 itself.
+    expect(atlascloud?.baseUrl).toBe('https://api.atlascloud.ai/v1')
     expect(atlascloud?.apiFormat).toBe('openai_chat')
     expect(atlascloud?.authStrategy).toBe('api_key')
     expect(atlascloud?.defaultModels).toEqual({

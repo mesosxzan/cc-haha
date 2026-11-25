@@ -82,6 +82,9 @@ async function main() {
     const model = provider.models?.main ?? ''
     console.log(`[record] ${format}: ${group.length} scenario(s) against ${provider.name} (${model}) at ${new URL(provider.baseUrl!).host}`)
     const providerConfig = Object.fromEntries(REPLAYED_PROVIDER_FIELDS.filter((field) => provider[field] !== undefined).map((field) => [field, provider[field]]))
+    // The recorder is registered with a /v1 base (see lane.ts providerUrlFor), so
+    // it receives CLI-proxy paths that already start with /v1; forward them to the
+    // bare upstream root to avoid doubling the version segment.
     const upstreamBase = format === 'openai_chat' ? provider.baseUrl!.replace(/\/+$/, '').replace(/\/v1$/, '') : provider.baseUrl!
     const recorded = await recordScenarios({
       rootDir,

@@ -2139,7 +2139,7 @@ describe('ProviderService', () => {
         expect(response.status).toBe(200)
         await response.text()
         expect(calls).toHaveLength(1)
-        expect(calls[0].url).toBe('https://api.example.com/v1/responses')
+        expect(calls[0].url).toBe('https://api.example.com/responses')
         const outboundTools = calls[0].body.tools as Array<{
           name: string
           strict?: boolean
@@ -3485,8 +3485,9 @@ describe('ProviderService', () => {
       })
     }
 
-    // #1816: a gateway that versions its own root (Volcengine Ark /api/v3, Zhipu
-    // /api/paas/v4) serves OpenAI routes directly under it; a second /v1 is a 404.
+    // The user-entered base is the complete base for OpenAI formats: only the
+    // action suffix is appended, never an inserted /v1 (#1816 gateways that
+    // version their own root keep working, and bare roots stay bare).
     for (const apiFormat of ['openai_chat', 'openai_responses'] as const) {
       const endpoint = apiFormat === 'openai_chat' ? 'chat/completions' : 'responses'
       for (const [basePath, upstreamPath] of [
@@ -3494,7 +3495,7 @@ describe('ProviderService', () => {
         ['/api/coding/v3/', `/api/coding/v3/${endpoint}`],
         ['/api/paas/v4', `/api/paas/v4/${endpoint}`],
         ['/v1', `/v1/${endpoint}`],
-        ['', `/v1/${endpoint}`],
+        ['', `/${endpoint}`],
       ]) {
         test(`${apiFormat} base URL ${basePath || '(root)'} reaches ${upstreamPath} in connectivity and proxy requests (#1816)`, async () => {
           const requests: Array<{ path: string; authorization: string | null }> = []
@@ -3801,8 +3802,8 @@ describe('ProviderService', () => {
         expect(result.connectivity.success).toBe(true)
         expect(result.proxy?.success).toBe(true)
         expect(calls.map((call) => call.url)).toEqual([
-          'http://127.0.0.1:11434/v1/chat/completions',
-          'http://127.0.0.1:11434/v1/chat/completions',
+          'http://127.0.0.1:11434/chat/completions',
+          'http://127.0.0.1:11434/chat/completions',
         ])
         expect(calls.map((call) => call.proxy)).toEqual([undefined, undefined])
       } finally {
@@ -3861,8 +3862,8 @@ describe('ProviderService', () => {
         expect(result.connectivity.success).toBe(true)
         expect(result.proxy?.success).toBe(true)
         expect(calls.map((call) => call.url)).toEqual([
-          'https://api.example.com/v1/chat/completions',
-          'https://api.example.com/v1/chat/completions',
+          'https://api.example.com/chat/completions',
+          'https://api.example.com/chat/completions',
         ])
         expect(calls.map((call) => call.proxy)).toEqual([undefined, undefined])
       } finally {
