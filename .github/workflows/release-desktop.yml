@@ -15,6 +15,11 @@ on:
         required: false
         default: true
         type: boolean
+      macos_signing:
+        description: 'Enable macOS signing & signing secrets validation'
+        required: false
+        default: true
+        type: boolean
       windows_signing:
         description: 'Windows signing: auto follows the WINDOWS_SIGNING_ENABLED repository variable'
         required: false
@@ -71,6 +76,7 @@ jobs:
         id: validate
         shell: bash
         env:
+          INPUT_MACOS_SIGNING: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_signing || true }}
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -86,22 +92,27 @@ jobs:
           WINDOWS_SIGNING_ENABLED: ${{ vars.WINDOWS_SIGNING_ENABLED == 'true' }}
           WINDOWS_SIGNING_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_signing || 'auto' }}
         run: |
-          # macOS signing + notarization is preferred: Squirrel.Mac auto-update and
-          # first-launch Gatekeeper approval and Computer Use client attestation
-          # require a consistent Developer ID build. Drafts use the same native
-          # runtime, so an unsigned macOS lane would be a knowingly broken app.
-          missing=()
-          [ -n "$CSC_LINK" ] || missing+=("MACOS_CERTIFICATE")
-          [ -n "$CSC_KEY_PASSWORD" ] || missing+=("MACOS_CERTIFICATE_PASSWORD")
-          [ -n "$APPLE_ID" ] || missing+=("APPLE_ID")
-          [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || missing+=("APPLE_APP_SPECIFIC_PASSWORD")
-          [ -n "$APPLE_TEAM_ID" ] || missing+=("APPLE_TEAM_ID")
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf '::error::Missing macOS signing/notarization secrets (%s): refusing to build a macOS release whose Computer Use runtime cannot pass client attestation.\n' "${missing[*]}"
+          if [ "$INPUT_MACOS_SIGNING" != "true" ]; then
+            echo "::notice::macOS signing is disabled by workflow input; skipping signing/notarization secret validation."
             echo "macos_signed=false" >> "$GITHUB_OUTPUT"
-            exit 1
           else
-            echo "macos_signed=true" >> "$GITHUB_OUTPUT"
+            # macOS signing + notarization is preferred: Squirrel.Mac auto-update and
+            # first-launch Gatekeeper approval and Computer Use client attestation
+            # require a consistent Developer ID build. Drafts use the same native
+            # runtime, so an unsigned macOS lane would be a knowingly broken app.
+            missing=()
+            [ -n "$CSC_LINK" ] || missing+=("MACOS_CERTIFICATE")
+            [ -n "$CSC_KEY_PASSWORD" ] || missing+=("MACOS_CERTIFICATE_PASSWORD")
+            [ -n "$APPLE_ID" ] || missing+=("APPLE_ID")
+            [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || missing+=("APPLE_APP_SPECIFIC_PASSWORD")
+            [ -n "$APPLE_TEAM_ID" ] || missing+=("APPLE_TEAM_ID")
+            if [ "${#missing[@]}" -gt 0 ]; then
+              printf '::error::Missing macOS signing/notarization secrets (%s): refusing to build a macOS release whose Computer Use runtime cannot pass client attestation.\n' "${missing[*]}"
+              echo "macos_signed=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            else
+              echo "macos_signed=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
           # Windows signing is opt-in while SignPath approval is pending: the
           # WINDOWS_SIGNING_ENABLED repository variable turns it on for every
@@ -993,13 +1004,4 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.draft == true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "v${{ steps.version.outputs.value }}" --json isDraft --jq 'if .isDraft then "release remains draft" else error("workflow-dispatch release was published unexpectedly") end' --repo "${{ github.repository }}"
-
-  release-mobile:
-    needs: publish-release
-    if: vars.MOBILE_RELEASE_ENABLED == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.draft == false))
-    uses: ./.github/workflows/release-mobile.yml
-    with:
-      release_tag: ${{ needs.publish-release.outputs.release_tag }}
-    secrets:
-      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: gh
