@@ -18,7 +18,7 @@ on:
       macos_signing:
         description: 'Enable macOS signing & signing secrets validation'
         required: false
-        default: true
+        default: false
         type: boolean
       windows_signing:
         description: 'Windows signing: auto follows the WINDOWS_SIGNING_ENABLED repository variable'
