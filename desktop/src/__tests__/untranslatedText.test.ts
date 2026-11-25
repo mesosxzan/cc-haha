@@ -43,7 +43,7 @@ const LANGUAGE_NEUTRAL: Record<string, string[]> = {
   'components/chat/MermaidRenderer.tsx': ['mermaid'], // the diagram language, as a code block labels it
   'components/chat/ToolCallBlock.tsx': ['bash', 'powershell'], // shell names, as a code block labels them
   'components/layout/H5ConnectionView.tsx': ['https://chat.example.com'], // example URL
-  'components/layout/Sidebar.tsx': ['cc-', 'haha', 'GitHub', 'cc-haha v${}'], // wordmark, brand, version tooltip
+  'components/layout/Sidebar.tsx': ['cc-haha v${}'], // version tooltip
   'components/market/FrontmatterPanel.tsx': ['true', 'false'], // YAML values, shown as written
   'components/market/InstallConfirmDialog.tsx': ['…/skills/'], // a path
   'components/market/MarketSkillDetail.tsx': ['SKILL.md'], // a file name
