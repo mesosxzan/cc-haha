@@ -293,7 +293,7 @@ describe('active sponsor providers', () => {
     })))
   })
 
-  it('lets a preset switch protocol while the preset endpoint stays put', async () => {
+  it('clears an untouched preset endpoint when switching to an OpenAI protocol', async () => {
     const create = vi.spyOn(providersApi, 'create').mockImplementation(async (input) => ({
       provider: { ...input, id: 'saved-aruhub', apiFormat: input.apiFormat ?? 'anthropic' },
     }))
@@ -311,14 +311,19 @@ describe('active sponsor providers', () => {
     fireEvent.click(await screen.findByRole('option', { name: /OpenAI Chat Completions/ }))
 
     expect(dialog.getByText(/point the base URL at an endpoint that serves it/)).toBeInTheDocument()
-    // The address is the user's to replace, so switching must not rewrite it.
-    expect(dialog.getByDisplayValue('https://agent.aruhub.com')).toBeInTheDocument()
+    // OpenAI protocols need the full versioned path, so the untouched preset
+    // default is cleared for the user to fill instead of being carried over.
+    expect(dialog.queryByDisplayValue('https://agent.aruhub.com')).not.toBeInTheDocument()
+    const baseUrlInput = dialog.getByRole('textbox', { name: /^Base URL/ })
+    expect(baseUrlInput).toHaveValue('')
+    expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/v1')
 
+    fireEvent.change(baseUrlInput, { target: { value: 'https://agent.aruhub.com/v1' } })
     fireEvent.change(dialog.getAllByPlaceholderText('sk-...')[0]!, { target: { value: 'fake-aruhub-key' } })
     fireEvent.click(dialog.getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({
       presetId: 'aruhub',
-      baseUrl: 'https://agent.aruhub.com',
+      baseUrl: 'https://agent.aruhub.com/v1',
       apiFormat: 'openai_chat',
       apiKey: 'fake-aruhub-key',
     })))
@@ -358,6 +363,99 @@ describe('active sponsor providers', () => {
     const dialog = within(screen.getByRole('dialog'))
     expect(dialog.getByRole('button', { name: 'Atlas Cloud' })).toBeInTheDocument()
     expect(dialog.queryByRole('button', { name: 'ApiSmart' })).not.toBeInTheDocument()
+  })
+})
+
+describe('OpenAI protocol base URL guidance', () => {
+  const originalState = useProviderStore.getState()
+
+  beforeEach(() => {
+    useProviderStore.setState({ presets: BUNDLED_PROVIDER_PRESETS })
+    useSettingsStore.setState({ locale: 'en' })
+    vi.spyOn(useSettingsStore.getState(), 'fetchAll').mockResolvedValue()
+    vi.spyOn(providersApi, 'list').mockResolvedValue({ providers: [], activeId: null })
+    vi.spyOn(providersApi, 'getSettings').mockResolvedValue({})
+    vi.spyOn(providersApi, 'updateSettings').mockResolvedValue({ ok: true })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    useProviderStore.setState(originalState)
+  })
+
+  const openAddDialog = async () => {
+    render(<ProviderSettings />)
+    fireEvent.click(await screen.findByRole('button', { name: /Add Model/ }))
+    return within(screen.getByRole('dialog'))
+  }
+
+  const pickApiFormat = async (dialog: ReturnType<typeof within>, triggerName: RegExp, optionName: RegExp) => {
+    fireEvent.click(dialog.getByRole('button', { name: triggerName }))
+    fireEvent.click(await screen.findByRole('option', { name: optionName }))
+  }
+
+  it('clears the untouched preset endpoint when switching to OpenAI Responses too', async () => {
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'AruHub' }))
+    expect(dialog.getByDisplayValue('https://agent.aruhub.com')).toBeInTheDocument()
+
+    await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Responses API/)
+
+    expect(dialog.getByRole('textbox', { name: /^Base URL/ })).toHaveValue('')
+    expect(dialog.queryByDisplayValue('https://agent.aruhub.com')).not.toBeInTheDocument()
+  })
+
+  it('keeps a hand-edited endpoint when switching to an OpenAI protocol', async () => {
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'AruHub' }))
+    fireEvent.change(dialog.getByDisplayValue('https://agent.aruhub.com'), { target: { value: 'https://my.gateway.dev/v1' } })
+
+    await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Chat Completions/)
+
+    expect(dialog.getByDisplayValue('https://my.gateway.dev/v1')).toBeInTheDocument()
+  })
+
+  it('keeps the endpoint of an OpenAI-native preset when switching between OpenAI protocols', async () => {
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Atlas Cloud' }))
+    expect(dialog.getByDisplayValue('https://api.atlascloud.ai')).toBeInTheDocument()
+
+    await pickApiFormat(dialog, /OpenAI Chat Completions \(proxy\)/, /OpenAI Responses API/)
+
+    expect(dialog.getByDisplayValue('https://api.atlascloud.ai')).toBeInTheDocument()
+  })
+
+  it('shows the full-path placeholder and hint only for OpenAI protocols', async () => {
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'Custom API' }))
+    const baseUrlInput = dialog.getByRole('textbox', { name: /^Base URL/ })
+    expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/anthropic')
+    expect(dialog.queryByText(/is not appended automatically/)).not.toBeInTheDocument()
+
+    await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Chat Completions/)
+    expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/v1')
+    expect(dialog.getByText(/Enter the full endpoint URL, e\.g\. https:\/\/api\.example\.com\/v1/)).toBeInTheDocument()
+
+    await pickApiFormat(dialog, /OpenAI Chat Completions \(proxy\)/, /Anthropic Messages/)
+    expect(baseUrlInput).toHaveAttribute('placeholder', 'https://api.example.com/anthropic')
+    expect(dialog.queryByText(/is not appended automatically/)).not.toBeInTheDocument()
+  })
+
+  it('keeps the cleared endpoint out of the settings JSON draft', async () => {
+    vi.mocked(providersApi.getSettings).mockResolvedValue({
+      env: { ANTHROPIC_BASE_URL: 'https://agent.aruhub.com', CUSTOM_ENV: 'keep' },
+    })
+    const dialog = await openAddDialog()
+    fireEvent.click(dialog.getByRole('button', { name: 'AruHub' }))
+    const settingsJsonOf = () => (dialog.getByRole('textbox', { name: 'Settings JSON' }) as HTMLTextAreaElement).value
+    await waitFor(() => expect(settingsJsonOf()).toContain('CUSTOM_ENV'))
+
+    await pickApiFormat(dialog, /Anthropic Messages \(native\)/, /OpenAI Chat Completions/)
+
+    // OpenAI formats route through the local proxy; the stale preset address
+    // must not survive in the draft env either.
+    expect(settingsJsonOf()).not.toContain('https://agent.aruhub.com')
   })
 })
 

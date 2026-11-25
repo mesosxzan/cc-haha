@@ -1392,6 +1392,10 @@ function providerNeedsProxy(
   return apiFormat !== 'anthropic' || !supportsNestedToolResultMedia
 }
 
+function isOpenaiApiFormat(apiFormat: ApiFormat): boolean {
+  return apiFormat === 'openai_chat' || apiFormat === 'openai_responses'
+}
+
 function updateSettingsJsonProviderConnection(
   raw: string,
   apiFormat: ApiFormat,
@@ -1862,8 +1866,18 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
   }
   const handleApiFormatChange = (value: ApiFormat) => {
     setApiFormat(value)
+    // OpenAI-style endpoints need the full versioned path (/v1, /api/v3, ...).
+    // A preset default that was never edited is an Anthropic-era address, so
+    // clear it instead of carrying it over; a hand-typed address stays.
+    const nextBaseUrl = isOpenaiApiFormat(value)
+      && !isOpenaiApiFormat(apiFormat)
+      && baseUrl.trim()
+      && normalizeProviderBaseUrl(baseUrl) === normalizeProviderBaseUrl(selectedPreset.baseUrl)
+      ? ''
+      : baseUrl
+    if (nextBaseUrl !== baseUrl) setBaseUrl(nextBaseUrl)
     setSettingsJson((current) => {
-      const connected = updateSettingsJsonProviderConnection(current, value, authStrategy, apiKey, selectedPreset, baseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia)
+      const connected = updateSettingsJsonProviderConnection(current, value, authStrategy, apiKey, selectedPreset, nextBaseUrl, providerProxyBaseUrl, toolSearchEnabled, disableExperimentalBetas, supportsNestedToolResultMedia)
       try {
         return JSON.stringify(writeCompatibilityJson(JSON.parse(connected), value === 'anthropic' ? parseAnthropicBudgetForm(compatibility) : parseCompatibilityForm(compatibility)), null, 2)
       } catch {
@@ -2286,7 +2300,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
               {t('settings.providers.baseUrl')}
               <span className="ml-0.5 text-[var(--color-error)]">*</span>
             </label>
-            <Tooltip content={t('settings.providers.baseUrlTooltip')} placement="bottom-start">
+            <Tooltip content={t(isOpenaiApiFormat(apiFormat) ? 'settings.providers.baseUrlTooltipOpenai' : 'settings.providers.baseUrlTooltip')} placement="bottom-start">
               <IconButton
                 icon={<Info size={12} strokeWidth={2} aria-hidden="true" />}
                 label={t('settings.providers.baseUrlHelp')}
@@ -2297,7 +2311,10 @@ function ProviderFormModal({ open, onClose, mode, provider, presets, initialPres
               />
             </Tooltip>
           </div>
-          <Input id={baseUrlInputId} required value={baseUrl} onChange={(e) => handleBaseUrlChange(e.target.value)} placeholder={t('settings.providers.baseUrlPlaceholder')} className="font-mono text-[13px]" />
+          <Input id={baseUrlInputId} required value={baseUrl} onChange={(e) => handleBaseUrlChange(e.target.value)} placeholder={t(isOpenaiApiFormat(apiFormat) ? 'settings.providers.baseUrlPlaceholderOpenai' : 'settings.providers.baseUrlPlaceholder')} className="font-mono text-[13px]" />
+          {isOpenaiApiFormat(apiFormat) && (
+            <p className={FORM_HINT}>{t('settings.providers.baseUrlFullUrlHint')}</p>
+          )}
         </div>
 
         <div className="flex flex-col gap-1">
