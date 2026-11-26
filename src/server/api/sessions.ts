@@ -56,6 +56,7 @@ import {
 import { listSkillSlashCommands, type SkillSlashCommand } from './skills.js'
 import { WorkspaceService, type WorkspaceRawFile } from '../services/workspaceService.js'
 import { ReviewService, type ReviewSource } from '../services/reviewService.js'
+import { generateReviewAi, type ReviewAiKind, type ReviewAiResult } from '../services/reviewAiService.js'
 import {
   createRepositoryBranch,
   getRepositoryContext,
@@ -917,20 +918,50 @@ async function handleSessionReviewRoute(
     )
   }
 
+  if (reviewResource === 'ai-generate') {
+    if (req.method !== 'POST') return reviewMethodNotAllowed(req)
+    return await handleReviewAiGenerate(req, sessionId)
+  }
+
+  if (reviewResource === 'commit') {
+    if (req.method !== 'POST') return reviewMethodNotAllowed(req)
+    const body = await readReviewJsonObject(req)
+    const message = body.message
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      throw ApiError.badRequest('message is required')
+    }
+    const amend = body.amend
+    if (amend !== undefined && typeof amend !== 'boolean') {
+      throw ApiError.badRequest('amend must be a boolean when provided')
+    }
+    const snapshot = body.snapshot
+    if (typeof snapshot !== 'string' || snapshot.length === 0) {
+      throw ApiError.badRequest('snapshot is required')
+    }
+    const source = body.source === undefined ? undefined : parseReviewWriteSource(body.source)
+    return await runReviewRequest(() =>
+      reviewService.commit(sessionId, { message, amend, snapshot, source }),
+    )
+  }
+
+  if (reviewResource === 'push' || reviewResource === 'sync') {
+    if (req.method !== 'POST') return reviewMethodNotAllowed(req)
+    return await runReviewRequest(() =>
+      reviewResource === 'push' ? reviewService.push(sessionId) : reviewService.sync(sessionId),
+    )
+  }
+
+  if (reviewResource === 'sync-state') {
+    if (req.method !== 'GET') return reviewMethodNotAllowed(req)
+    return await runReviewRequest(() => reviewService.getSyncState(sessionId))
+  }
+
   if (!REVIEW_WRITE_RESOURCES.has(reviewResource)) {
     throw ApiError.notFound(`Unknown review resource: ${reviewResource}`)
   }
   if (req.method !== 'POST') return reviewMethodNotAllowed(req)
 
-  let body: Record<string, unknown>
-  try {
-    body = (await req.json()) as Record<string, unknown>
-  } catch {
-    throw ApiError.badRequest('Invalid JSON body')
-  }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw ApiError.badRequest('Request body must be an object')
-  }
+  const body = await readReviewJsonObject(req)
 
   const snapshot = body.snapshot
   if (typeof snapshot !== 'string' || snapshot.length === 0) {
@@ -964,11 +995,77 @@ async function handleSessionReviewRoute(
   })
 }
 
+/**
+ * `POST /review/ai-generate` — AI code review / commit message for one explicit
+ * review source. Text generation only; it never touches the index or worktree,
+ * so it carries no snapshot token. Generation outcomes are answer states
+ * (`no_changes`, `no_provider`, `provider_error`) rather than HTTP errors, so
+ * the panel can render each with its own affordance.
+ */
+async function handleReviewAiGenerate(req: Request, sessionId: string): Promise<Response> {
+  const body = await readReviewJsonObject(req)
+
+  const kind = body.kind
+  if (kind !== 'review' && kind !== 'commit-message') {
+    throw ApiError.badRequest('kind must be "review" or "commit-message"')
+  }
+  // `parseReviewSourceValue` already refuses the turn source with a 400.
+  const source = parseReviewSourceValue(body.source)
+  const providerId = body.providerId
+  if (providerId !== undefined && providerId !== null && typeof providerId !== 'string') {
+    throw ApiError.badRequest('providerId must be a string when provided')
+  }
+  const language = body.language
+  if (language !== undefined && typeof language !== 'string') {
+    throw ApiError.badRequest('language must be a string when provided')
+  }
+
+  // Git/path failures come back as the `error` answer state; the shared
+  // middleware turns unexpected throws into 500s.
+  const result: ReviewAiResult = await generateReviewAi(reviewService, {
+    sessionId,
+    kind: kind as ReviewAiKind,
+    source,
+    providerId,
+    language,
+    signal: req.signal,
+  })
+  switch (result.state) {
+    case 'ok':
+    case 'no_changes':
+      return Response.json(result)
+    case 'no_provider':
+      return Response.json(result, { status: 409 })
+    case 'provider_error':
+      return Response.json(result, {
+        status: result.reason === 'rate-limit' ? 429
+          : result.reason === 'timeout' ? 504
+          : result.reason === 'aborted' ? 499
+          : 502,
+      })
+    case 'error':
+      return Response.json(result, { status: 500 })
+  }
+}
+
 function reviewMethodNotAllowed(req: Request): Response {
   return Response.json(
     { error: 'METHOD_NOT_ALLOWED', message: `Method ${req.method} not allowed` },
     { status: 405 },
   )
+}
+
+async function readReviewJsonObject(req: Request): Promise<Record<string, unknown>> {
+  let body: Record<string, unknown>
+  try {
+    body = (await req.json()) as Record<string, unknown>
+  } catch {
+    throw ApiError.badRequest('Invalid JSON body')
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw ApiError.badRequest('Request body must be an object')
+  }
+  return body
 }
 
 function parseReviewPaths(value: unknown): string[] {

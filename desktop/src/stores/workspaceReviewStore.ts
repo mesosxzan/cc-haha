@@ -5,7 +5,9 @@ import {
   reviewApi,
   type GitReviewSource,
   type ResolvedReviewSource,
+  type ReviewCommitResult,
   type ReviewDiffResult,
+  type ReviewRemoteResult,
   type ReviewStatusResult,
   type ReviewWriteResult,
 } from '../api/review'
@@ -159,6 +161,19 @@ type WorkspaceReviewStore = {
   revert: (sessionId: string, source: WorkspaceReviewSource, paths: string[]) => Promise<WorkspaceReviewWriteOutcome>
   stageHunk: (sessionId: string, source: WorkspaceReviewSource, patch: string) => Promise<WorkspaceReviewWriteOutcome>
   unstageHunk: (sessionId: string, source: WorkspaceReviewSource, patch: string) => Promise<WorkspaceReviewWriteOutcome>
+  /**
+   * Commit the index. `source` is only the comparison whose refreshed status
+   * the result should carry — the commit itself always acts on the index, so
+   * the snapshot is taken from the HEAD-based `uncommitted` entry.
+   */
+  commit: (
+    sessionId: string,
+    request: { message: string; amend?: boolean },
+    source?: WorkspaceReviewSource,
+  ) => Promise<ReviewCommitResult | WorkspaceReviewRefusal>
+  /** Remote operations invalidate every cached comparison for the session. */
+  push: (sessionId: string) => Promise<ReviewRemoteResult>
+  sync: (sessionId: string) => Promise<ReviewRemoteResult>
   clearSession: (sessionId: string) => void
   clearTurnReviews: (sessionId: string, fromUserMessageIndex: number) => void
 }
@@ -397,6 +412,10 @@ export const useWorkspaceReviewStore = create<WorkspaceReviewStore>((set, get) =
   stageHunk: (sessionId, source, patch) => runHunkWrite(set, get, sessionId, source, patch, 'stageHunk'),
   unstageHunk: (sessionId, source, patch) => runHunkWrite(set, get, sessionId, source, patch, 'unstageHunk'),
 
+  commit: (sessionId, request, source) => runCommit(set, get, sessionId, request, source),
+  push: (sessionId) => withReviewWrite(sessionId, () => reviewApi.push(sessionId)),
+  sync: (sessionId) => withReviewWrite(sessionId, () => reviewApi.sync(sessionId)),
+
   clearSession: (sessionId) =>
     set((state) => {
       const prefix = `${sessionId}::`
@@ -511,6 +530,59 @@ async function runHunkWrite(
     diffsByPath: {},
     diffLoadingByPath: {},
   } } }))
+  return result
+}
+
+async function runCommit(
+  set: SetState,
+  get: () => WorkspaceReviewStore,
+  sessionId: string,
+  request: { message: string; amend?: boolean },
+  source?: WorkspaceReviewSource,
+): Promise<ReviewCommitResult | WorkspaceReviewRefusal> {
+  // The snapshot guard describes HEAD + index + worktree, so it is taken from
+  // the canonical `uncommitted` entry the commit box keeps loaded — whatever
+  // comparison the panel is displaying.
+  const guardSource: WorkspaceReviewSource = { kind: 'uncommitted' }
+  const guardKey = entryKey(sessionId, guardSource)
+  const guardEntry = get().byKey[guardKey]
+  if (guardEntry?.stale) return { state: 'stale', snapshot: guardEntry.status?.snapshot ?? '' }
+  const snapshot = guardEntry?.status?.snapshot
+  if (!snapshot) return refuse('no_snapshot')
+
+  const refreshSource = source && isWritableReviewSource(source) ? source : guardSource
+  const refreshKey = entryKey(sessionId, refreshSource)
+  const result = await withReviewWrite(sessionId, () => reviewApi.commit(sessionId, {
+    ...request,
+    snapshot,
+    source: refreshSource as GitReviewSource,
+  }))
+
+  // A commit rewrites HEAD, the left-hand side of every working-tree and
+  // branch comparison, so all of them are stale now — drop them and let the
+  // mounted panels reload. The refreshed comparison is re-seeded below.
+  const prefix = `${sessionId}::`
+  set((state) => {
+    const byKey = { ...state.byKey }
+    for (const key of Object.keys(byKey)) {
+      if (!key.startsWith(prefix)) continue
+      const suffix = key.slice(prefix.length)
+      if (suffix.startsWith('unstaged') || suffix.startsWith('staged') || suffix.startsWith('uncommitted') || suffix.startsWith('branch')) {
+        delete byKey[key]
+        nextRequest(key)
+      }
+    }
+    const entry = emptyEntryFor(refreshSource)
+    byKey[refreshKey] = {
+      ...entry,
+      stale: result.state === 'stale',
+      error: result.state === 'stale' || result.state === 'ok' ? null : result.error ?? null,
+      status: result.status ?? (refreshKey === guardKey ? guardEntry?.status ?? null : null),
+      viewedPaths: [],
+      viewedSnapshot: result.snapshot || null,
+    }
+    return { byKey }
+  })
   return result
 }
 

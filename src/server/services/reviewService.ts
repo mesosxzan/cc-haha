@@ -30,6 +30,8 @@ import {
 const execFile = promisify(execFileCallback)
 
 const GIT_TIMEOUT_MS = 10_000
+/** Push/pull talk to a remote; a slow link is not a hung process. */
+const GIT_REMOTE_TIMEOUT_MS = 60_000
 const MAX_GIT_BUFFER_BYTES = 8_000_000
 /** Read a whole untracked file into memory only below this size. */
 const MAX_UNTRACKED_STAT_BYTES = 256 * 1024
@@ -245,6 +247,55 @@ export type ReviewHunkRequest = {
   patch: string
   snapshot: string
   source?: ReviewSource
+}
+
+export type ReviewCommitRequest = {
+  message: string
+  /** Rewrite `HEAD` instead of adding a commit on top of it. */
+  amend?: boolean
+  snapshot: string
+  /** When set, the result carries a freshly recomputed status for this source. */
+  source?: ReviewSource
+}
+
+export type ReviewCommitOutcome =
+  /** The index was empty, so there was nothing to commit. */
+  | 'nothing_to_commit'
+  /** `--amend` in a repository that has no commits yet. */
+  | 'no_head'
+  /** Unmerged paths: committing would record conflict markers. */
+  | 'conflicted'
+
+export type ReviewCommitResult = {
+  state: ReviewState | 'stale'
+  snapshot: string
+  outcome?: ReviewCommitOutcome
+  /** Sha of the commit that was created (or rewritten). */
+  commit?: string
+  status?: ReviewStatusResult
+  error?: string
+}
+
+/**
+ * `push` and `sync` touch the remote, not the index or the working tree, so
+ * they carry no snapshot token — there is nothing local a stale read could
+ * mis-apply. Their failures are answer states the panel renders, not throws.
+ */
+export type ReviewRemoteResult = {
+  state: 'ok' | 'error'
+  /** `sync` only: what the pull half did before the push. */
+  pulled?: 'up_to_date' | 'updated'
+  error?: string
+}
+
+export type ReviewSyncStateResult = {
+  state: ReviewState
+  branch: string | null
+  /** Configured upstream (`branch.<name>.merge` via `@{upstream}`), if any. */
+  upstream: string | null
+  ahead: number
+  behind: number
+  error?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -935,6 +986,162 @@ export class ReviewService {
 
       return { results, backupDir: backupDirCreated ? backupDir : undefined }
     })
+  }
+
+  // -- commit / remote --------------------------------------------------------
+
+  /**
+   * Commit exactly what is in the index. Auto-staging is the caller's decision
+   * (the panel stages first through the normal snapshot-guarded write), so this
+   * never quietly widens the commit beyond what the user staged.
+   */
+  async commit(sessionId: string, request: ReviewCommitRequest): Promise<ReviewCommitResult> {
+    const message = typeof request.message === 'string' ? request.message.trim() : ''
+    if (!message) return { state: 'error', snapshot: '', error: 'Commit message is required' }
+    if (typeof request.snapshot !== 'string' || request.snapshot.length === 0) {
+      return { state: 'error', snapshot: '', error: 'snapshot is required for review writes' }
+    }
+    const refusal = rejectUnwritableSource(request.source)
+    if (refusal) return { state: 'error', snapshot: '', error: refusal }
+
+    const prepared = await this.prepare(sessionId)
+    if (prepared.kind === 'failed') return { state: prepared.state, snapshot: '', error: prepared.error }
+    const { ctx } = prepared
+
+    const head = await this.resolveHead(ctx)
+    const statusEntries = await this.readStatus(ctx)
+    if (statusEntries.kind === 'error') return { state: 'error', snapshot: '', error: statusEntries.message }
+    const snapshot = await this.computeSnapshot(ctx, head, statusEntries.entries)
+    if (snapshot !== request.snapshot) {
+      return {
+        state: 'stale',
+        snapshot,
+        error: 'Review snapshot changed since it was read; nothing was applied',
+      }
+    }
+
+    if (statusEntries.entries.some((entry) => entry.conflicted)) {
+      return { state: 'error', snapshot, outcome: 'conflicted', error: 'Resolve the conflicted paths before committing' }
+    }
+    if (request.amend && !head) {
+      return { state: 'error', snapshot, outcome: 'no_head', error: NO_HEAD_MESSAGE }
+    }
+    if (!request.amend && !statusEntries.entries.some((entry) => entry.stagedChange)) {
+      return { state: 'ok', snapshot, outcome: 'nothing_to_commit' }
+    }
+
+    // `-m` passes the message as one argument, never through a shell, and git
+    // strips comment lines and trailing whitespace itself. Hooks run normally:
+    // a failing pre-commit hook is a real refusal the user must see, not
+    // something to bypass.
+    const args = ['commit', ...(request.amend ? ['--amend'] : []), '-m', message]
+    const result = await this.runGit(ctx.repoRoot, args)
+    if (result.code !== 0) {
+      return {
+        state: 'error',
+        snapshot,
+        error: this.formatGitError('Failed to commit', args, ctx.repoRoot, result),
+      }
+    }
+    const commit = await this.resolveHead(ctx)
+    const status = request.source ? await this.getStatus(sessionId, request.source) : undefined
+    return {
+      state: 'ok',
+      snapshot: status?.snapshot ?? snapshot,
+      commit: commit ?? undefined,
+      status,
+    }
+  }
+
+  /** Push `HEAD` to its upstream, or publish the branch to `origin` once. */
+  async push(sessionId: string): Promise<ReviewRemoteResult> {
+    const prepared = await this.prepare(sessionId)
+    if (prepared.kind === 'failed') return { state: 'error', error: prepared.error ?? prepared.state }
+    const { ctx } = prepared
+    if (!(await this.resolveHead(ctx))) return { state: 'error', error: NO_HEAD_MESSAGE }
+
+    if (await this.hasUpstream(ctx)) {
+      return await this.runRemoteGit(ctx, ['push'], 'Failed to push')
+    }
+    // Publishing needs a named remote; guessing anything but the conventional
+    // `origin` could push private work to the wrong place.
+    const remotes = await this.runGit(ctx.repoRoot, ['remote'])
+    if (!remotes.stdout.split('\n').map((line) => line.trim()).includes('origin')) {
+      return { state: 'error', error: 'This branch has no upstream and the repository has no "origin" remote to publish to' }
+    }
+    return await this.runRemoteGit(ctx, ['push', '--set-upstream', 'origin', 'HEAD'], 'Failed to publish branch')
+  }
+
+  /** Pull with rebase (never an implicit merge commit), then push. */
+  async sync(sessionId: string): Promise<ReviewRemoteResult> {
+    const prepared = await this.prepare(sessionId)
+    if (prepared.kind === 'failed') return { state: 'error', error: prepared.error ?? prepared.state }
+    const { ctx } = prepared
+    if (!(await this.resolveHead(ctx))) return { state: 'error', error: NO_HEAD_MESSAGE }
+    if (!(await this.hasUpstream(ctx))) {
+      return { state: 'error', error: 'This branch has no upstream to sync with; publish it first' }
+    }
+
+    const before = await this.resolveHead(ctx)
+    const pull = await this.runRemoteGit(ctx, ['pull', '--rebase'], 'Failed to pull')
+    if (pull.state !== 'ok') return pull
+    // A rebase that stops on a conflict leaves the repository mid-operation;
+    // pushing then would either fail or publish the wrong history.
+    const rebaseProbe = await this.runGit(ctx.repoRoot, ['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'])
+    if (rebaseProbe.code === 0) {
+      return { state: 'error', error: 'Pull stopped on a rebase conflict; resolve it before syncing again' }
+    }
+    const after = await this.resolveHead(ctx)
+    const pushed = await this.runRemoteGit(ctx, ['push'], 'Failed to push')
+    if (pushed.state !== 'ok') return pushed
+    return { state: 'ok', pulled: before === after ? 'up_to_date' : 'updated' }
+  }
+
+  /** Upstream and divergence counts for the sync affordance. */
+  async getSyncState(sessionId: string): Promise<ReviewSyncStateResult> {
+    const empty = { branch: null, upstream: null, ahead: 0, behind: 0 }
+    const prepared = await this.prepare(sessionId)
+    if (prepared.kind === 'failed') {
+      return { state: prepared.state, ...empty, error: prepared.error }
+    }
+    const { ctx } = prepared
+    const branchResult = await this.runGit(ctx.repoRoot, ['branch', '--show-current'])
+    const branch = branchResult.stdout.trim() || null
+    if (!(await this.hasUpstream(ctx))) return { state: 'ok', branch, upstream: null, ahead: 0, behind: 0 }
+
+    const upstreamResult = await this.runGit(ctx.repoRoot, ['rev-parse', '--abbrev-ref', '@{upstream}'])
+    const upstream = upstreamResult.stdout.trim() || null
+    const counts = await this.runGit(ctx.repoRoot, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'])
+    const [behind, ahead] = counts.stdout.trim().split(/\s+/).map((value) => Number.parseInt(value, 10))
+    if (counts.code !== 0 || !Number.isFinite(ahead) || !Number.isFinite(behind)) {
+      return {
+        state: 'error',
+        branch,
+        upstream,
+        ahead: 0,
+        behind: 0,
+        error: this.formatGitError('Failed to read upstream divergence', ['rev-list', '--count'], ctx.repoRoot, counts),
+      }
+    }
+    return { state: 'ok', branch, upstream, ahead, behind }
+  }
+
+  private async hasUpstream(ctx: ReviewContext): Promise<boolean> {
+    const result = await this.runGit(ctx.repoRoot, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
+    return result.code === 0 && result.stdout.trim().length > 0
+  }
+
+  /**
+   * Remote commands get a longer budget than local plumbing: a push over a
+   * slow link is legitimately slower than 10s, and killing it mid-transfer
+   * would report a failure for an operation that may have landed.
+   */
+  private async runRemoteGit(ctx: ReviewContext, args: string[], prefix: string): Promise<ReviewRemoteResult> {
+    const result = await this.runGit(ctx.repoRoot, args, GIT_REMOTE_TIMEOUT_MS)
+    if (result.code !== 0) {
+      return { state: 'error', error: this.formatGitError(prefix, args, ctx.repoRoot, result) }
+    }
+    return { state: 'ok' }
   }
 
   // -- write orchestration --------------------------------------------------
@@ -1978,7 +2185,7 @@ export class ReviewService {
     return env
   }
 
-  private async runGit(cwd: string, args: string[]): Promise<GitCommandResult> {
+  private async runGit(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<GitCommandResult> {
     // `core.quotePath=false` keeps non-ASCII paths as UTF-8 instead of the
     // C-quoted `"\303\251.txt"` form. A quoted path in patch text made
     // `collectPatchPaths` validate a filename that does not exist, while
@@ -1987,7 +2194,7 @@ export class ReviewService {
     try {
       const result = await execFile('git', fullArgs, {
         cwd,
-        timeout: GIT_TIMEOUT_MS,
+        timeout: timeoutMs,
         windowsHide: true,
         maxBuffer: MAX_GIT_BUFFER_BYTES,
         encoding: 'utf8',

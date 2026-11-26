@@ -11,6 +11,12 @@ const reviewApi = vi.hoisted(() => ({
   revert: vi.fn(),
   stageHunk: vi.fn(),
   unstageHunk: vi.fn(),
+  aiGenerate: vi.fn(),
+  getRevision: vi.fn(),
+  getSyncState: vi.fn(),
+  commit: vi.fn(),
+  push: vi.fn(),
+  sync: vi.fn(),
 }))
 
 vi.mock('../../api/review', () => ({ reviewApi }))
@@ -89,6 +95,11 @@ function diffFor(path: string): ReviewDiffResult {
 
 function writeResult(overrides: Partial<ReviewWriteResult> = {}): ReviewWriteResult {
   return { state: 'ok', snapshot: 'snap-2', results: [], ...overrides }
+}
+
+/** The commit box loads the `uncommitted` guard comparison too; count only reads of the displayed one. */
+function statusReads(kind: WorkspaceReviewSource['kind'] = 'unstaged') {
+  return reviewApi.getStatus.mock.calls.filter(([, requested]) => (requested as WorkspaceReviewSource).kind === kind).length
 }
 
 function openReviewTab(source?: WorkspaceReviewSource, path?: string) {
@@ -181,6 +192,8 @@ beforeEach(() => {
   reviewApi.getStatus.mockResolvedValue(status())
   reviewApi.getDiff.mockImplementation((_session: string, _source: unknown, path: string) =>
     Promise.resolve(diffFor(path)))
+  reviewApi.getRevision.mockResolvedValue({ state: 'ok', source: { kind: 'unstaged' }, snapshot: 'snap-1' })
+  reviewApi.getSyncState.mockResolvedValue({ state: 'ok', branch: 'main', upstream: null, ahead: 0, behind: 0 })
 })
 
 afterEach(() => {
@@ -230,7 +243,7 @@ describe('comparison picker', () => {
     fireEvent.change(field, { target: { value: '  ' } })
     fireEvent.keyDown(field, { key: 'Enter' })
     expect(screen.getByRole('alert')).toHaveTextContent('Enter a reference.')
-    expect(reviewApi.getStatus).toHaveBeenCalledTimes(1)
+    expect(statusReads()).toBe(1)
     fireEvent.keyDown(field, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
@@ -404,7 +417,7 @@ describe('stale writes', () => {
     )
     expect(reviewApi.stage).toHaveBeenCalledTimes(1)
     // No automatic re-read either: refreshing is the user's call.
-    expect(reviewApi.getStatus).toHaveBeenCalledTimes(1)
+    expect(statusReads()).toBe(1)
   })
 
   it('re-reads only when the user asks', async () => {
@@ -412,7 +425,7 @@ describe('stale writes', () => {
 
     fireEvent.click(screen.getByTestId('workspace-review-refresh'))
 
-    await waitFor(() => expect(reviewApi.getStatus).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(statusReads()).toBe(2))
   })
 
   it('points at the recoverable copy a discard left behind', async () => {
@@ -888,7 +901,7 @@ describe('review hunk and restore controls', () => {
     expect(screen.getByTestId('workspace-tree-sidebar')).not.toBeVisible()
     fireEvent.click(toggle)
     expect(screen.getByTestId('workspace-tree-sidebar')).toBeVisible()
-    expect(reviewApi.getStatus).toHaveBeenCalledTimes(1)
+    expect(statusReads()).toBe(1)
   })
 })
 
@@ -913,7 +926,7 @@ it('switches between unified and split diff without rereading or changing the sn
   expect(screen.getByTestId(`diff-surface-${MODIFIED}`)).toHaveAttribute('data-mode', 'unified')
   expect(screen.getByRole('radio', { name: 'Unified diff' })).toHaveAttribute('aria-checked', 'true')
   expect(screen.getByRole('radiogroup', { name: 'Diff layout' })).toBeInTheDocument()
-  expect(reviewApi.getStatus).toHaveBeenCalledTimes(1)
+  expect(statusReads()).toBe(1)
 })
 
 describe('change summary marks', () => {
@@ -1080,5 +1093,101 @@ describe('review content parity', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('AI generation entry points', () => {
+  it('opens the AI review dialog for the current comparison', async () => {
+    reviewApi.aiGenerate.mockResolvedValue({
+      state: 'ok', kind: 'review', source: { kind: 'unstaged' }, snapshot: 'snap-1',
+      text: 'All good.', includedFiles: 3, totalFiles: 3, truncated: false,
+    })
+    await renderReview()
+    fireEvent.click(screen.getByTestId('workspace-review-ai-review'))
+    expect(await screen.findByRole('dialog', { name: 'AI code review' })).toBeInTheDocument()
+    await waitFor(() => expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ kind: 'review', source: { kind: 'unstaged' } }),
+      expect.anything(),
+    ))
+  })
+
+  it('targets all uncommitted changes when generating a commit message from unstaged', async () => {
+    reviewApi.aiGenerate.mockResolvedValue({
+      state: 'ok', kind: 'commit-message', source: { kind: 'uncommitted' }, snapshot: 'snap-1',
+      text: 'feat(review): message', includedFiles: 3, totalFiles: 3, truncated: false,
+    })
+    await renderReview()
+    fireEvent.click(screen.getByTestId('workspace-review-ai-commit'))
+    await waitFor(() => expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ kind: 'commit-message', source: { kind: 'uncommitted' } }),
+      expect.anything(),
+    ))
+  })
+
+  it('keeps the staged comparison for a commit message when already staged', async () => {
+    reviewApi.getStatus.mockResolvedValue(status({
+      source: { kind: 'staged' },
+      files: [file(STAGED_FILE, { staged: true, unstaged: false })],
+      untracked: [],
+    }))
+    reviewApi.aiGenerate.mockResolvedValue({
+      state: 'ok', kind: 'commit-message', source: { kind: 'staged' }, snapshot: 'snap-1',
+      text: 'feat(review): message', includedFiles: 1, totalFiles: 1, truncated: false,
+    })
+    await renderReview({ source: { kind: 'staged' } })
+    fireEvent.click(screen.getByTestId('workspace-review-ai-commit'))
+    await waitFor(() => expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ kind: 'commit-message', source: { kind: 'staged' } }),
+      expect.anything(),
+    ))
+  })
+
+  it('offers AI review but no commit message on a read-only branch comparison', async () => {
+    reviewApi.getStatus.mockResolvedValue(status({ source: { kind: 'branch', baseRef: 'main', resolvedBase: 'abc123' } }))
+    reviewApi.aiGenerate.mockResolvedValue({
+      state: 'ok', kind: 'review', source: { kind: 'branch', baseRef: 'main' }, snapshot: 'snap-1',
+      text: 'Branch looks fine.', includedFiles: 3, totalFiles: 3, truncated: false,
+    })
+    await renderReview({ source: { kind: 'branch', baseRef: 'main' }, defaultBranchRef: 'main' })
+    expect(screen.getByTestId('workspace-review-ai-review')).toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-review-ai-commit')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('workspace-review-ai-review'))
+    await waitFor(() => expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ kind: 'review', source: { kind: 'branch', baseRef: 'main' } }),
+      expect.anything(),
+    ))
+  })
+
+  it('hides the AI actions when the comparison has no changes', async () => {
+    reviewApi.getStatus.mockResolvedValue(status({ files: [], untracked: [], totals: { additions: 0, deletions: 0, files: 0 } }))
+    await renderReview()
+    expect(screen.queryByTestId('workspace-review-ai-review')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('workspace-review-ai-commit')).not.toBeInTheDocument()
+  })
+})
+
+describe('commit box wiring', () => {
+  it('shows the commit box on a writable comparison and commits through the store', async () => {
+    reviewApi.commit.mockResolvedValue({ state: 'ok', snapshot: 'snap-2', commit: 'abc1234', status: status({ snapshot: 'snap-2', files: [], untracked: [] }) })
+    reviewApi.stage.mockResolvedValue(writeResult({ snapshot: 'snap-1b' }))
+    await renderReview()
+    const box = screen.getByTestId('workspace-review-commit-box')
+    expect(box).toBeInTheDocument()
+    fireEvent.change(within(box).getByTestId('workspace-review-commit-message'), { target: { value: 'feat: from the panel' } })
+    fireEvent.click(within(box).getByTestId('workspace-review-commit-primary'))
+    await waitFor(() => expect(reviewApi.commit).toHaveBeenCalledWith(SESSION, expect.objectContaining({
+      message: 'feat: from the panel',
+      snapshot: 'snap-1',
+    })))
+  })
+
+  it('keeps the commit box off read-only comparisons', async () => {
+    reviewApi.getStatus.mockResolvedValue(status({ source: { kind: 'branch', baseRef: 'main', resolvedBase: 'abc123' } }))
+    await renderReview({ source: { kind: 'branch', baseRef: 'main' }, defaultBranchRef: 'main' })
+    expect(screen.queryByTestId('workspace-review-commit-box')).not.toBeInTheDocument()
   })
 })

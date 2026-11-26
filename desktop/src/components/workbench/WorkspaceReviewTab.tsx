@@ -13,11 +13,13 @@ import {
   FolderOpen,
   FolderX,
   Columns2,
+  GitCommitHorizontal,
   History,
   List,
   ListFilter,
   Plus,
   RefreshCw,
+  ScanSearch,
   Undo2,
   WrapText,
 } from 'lucide-react'
@@ -43,6 +45,8 @@ import { parseWorkspaceDiff } from '@/components/workspace/workspaceDiffModel'
 import { splitReviewHunks } from '@/lib/workspace/reviewHunks'
 import { workspaceOpen } from '@/lib/workspace/openTarget'
 import { useMenuKeyboard } from './menuKeyboard'
+import { ReviewAiDialog } from './ReviewAiDialog'
+import { ReviewCommitBox } from './ReviewCommitBox'
 import { useRovingTree } from './treeKeyboard'
 import { useFixedVirtualWindow, useVariableVirtualWindow } from './useVirtualWindow'
 import { useWorkspaceReviewRefresh } from '@/lib/workspace/useWorkspaceReviewRefresh'
@@ -53,7 +57,7 @@ import {
   type WorkspaceReviewSource,
   type WorkspaceReviewTab as WorkspaceReviewTabModel,
 } from '../../lib/workspace/types'
-import type { ReviewFile } from '../../api/review'
+import type { GitReviewSource, ReviewAiKind, ReviewFile } from '../../api/review'
 
 const REVIEW_MENU_ITEM = 'flex h-8 w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left text-[13px] text-[var(--color-text-primary)] outline-none transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-border-focus)]'
 
@@ -225,6 +229,7 @@ export function WorkspaceReviewTab({
   const [collapsedDirs, setCollapsedDirs] = useState<ReadonlySet<string>>(() => new Set())
   const [pendingRevert, setPendingRevert] = useState<string[] | null>(null)
   const [operationError, setOperationError] = useState<string | null>(null)
+  const [aiRequest, setAiRequest] = useState<{ kind: ReviewAiKind; source: GitReviewSource } | null>(null)
   const sourceMenuRef = useRef<HTMLDivElement>(null)
   const sourceTriggerRef = useRef<HTMLButtonElement>(null)
   const cardsScrollRef = useRef<HTMLDivElement>(null)
@@ -273,6 +278,12 @@ export function WorkspaceReviewTab({
 
   const source = tab.source
   useWorkspaceReviewRefresh(sessionId, source, active)
+  // The commit box guards its write with the HEAD-based `uncommitted`
+  // snapshot regardless of the displayed comparison, so that entry must stay
+  // live too. When it *is* the displayed one this is the same key and the
+  // store's in-flight/cache checks make the second call a no-op.
+  const commitGuardSource = useMemo<WorkspaceReviewSource>(() => ({ kind: 'uncommitted' }), [])
+  useWorkspaceReviewRefresh(sessionId, commitGuardSource, active && source.kind !== 'turn')
   const reviewScope = JSON.stringify([sessionId, tab.id, reviewSourceKey(source)])
   const setFileOpen = useCallback((path: string, open: boolean | undefined) => {
     setOpenByScope(current => {
@@ -357,7 +368,8 @@ export function WorkspaceReviewTab({
     const saved = useWorkspaceStore.getState().getTab(sessionId, tab.id)
     if (saved?.kind === 'review' && saved.viewedPaths) useWorkspaceReviewStore.getState().restoreViewed(sessionId, source, saved.viewedPaths, saved.viewedSnapshot)
     void load(sessionId, source)
-  }, [load, sessionId, source, tab.id])
+    if (source.kind !== 'turn' && source.kind !== 'uncommitted') void load(sessionId, commitGuardSource)
+  }, [commitGuardSource, load, sessionId, source, tab.id])
 
   useEffect(() => {
     if (entry.status && !entry.loading) useWorkspaceStore.getState().setReviewViewedPaths(sessionId, tab.id, entry.viewedPaths, entry.viewedSnapshot ?? undefined)
@@ -651,6 +663,33 @@ export function WorkspaceReviewTab({
         ) : null}
 
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {source.kind !== 'turn' && entry.status?.state === 'ok' && files.length > 0 ? (
+            <>
+              <IconButton
+                icon={<ScanSearch size={14} strokeWidth={1.75} />}
+                label={t('workspace.review.aiReview')}
+                size="sm"
+                tone="muted"
+                data-testid="workspace-review-ai-review"
+                onClick={() => setAiRequest({ kind: 'review', source })}
+              />
+              {/* A commit message describes what is (or would be) committed:
+                  the index for `staged`, everything uncommitted otherwise. */}
+              {source.kind === 'staged' || source.kind === 'unstaged' || source.kind === 'uncommitted' ? (
+                <IconButton
+                  icon={<GitCommitHorizontal size={14} strokeWidth={1.75} />}
+                  label={t('workspace.review.aiCommitMessage')}
+                  size="sm"
+                  tone="muted"
+                  data-testid="workspace-review-ai-commit"
+                  onClick={() => setAiRequest({
+                    kind: 'commit-message',
+                    source: source.kind === 'staged' ? source : { kind: 'uncommitted' },
+                  })}
+                />
+              ) : null}
+            </>
+          ) : null}
           <SegmentedControl<WorkspaceDiffMode>
             size="sm"
             label={t('workspace.review.diffLayout')}
@@ -708,6 +747,17 @@ export function WorkspaceReviewTab({
             <p className="shrink-0 border-b border-[var(--color-border)] px-3 py-1.5 text-[12px] text-[var(--color-text-tertiary)]">
               {t('workspace.review.backupSaved', { path: entry.lastBackupDir })}
             </p>
+          ) : null}
+
+          {/* The source-control commit box sits above the changes, as in the
+              reference SCM view. Read-only comparisons (branch/commit/turn)
+              have nothing to commit and keep the panel purely comparative. */}
+          {writable ? (
+            <ReviewCommitBox
+              sessionId={sessionId}
+              source={source}
+              enabled={!entry.stale && !entry.loading}
+            />
           ) : null}
 
           {/* The cards scroll vertically here; each card's diff scrolls sideways
@@ -945,6 +995,14 @@ export function WorkspaceReviewTab({
         confirmLabel={t('workspace.review.revert')}
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
+      />
+
+      <ReviewAiDialog
+        open={aiRequest !== null}
+        kind={aiRequest?.kind ?? 'review'}
+        sessionId={sessionId}
+        source={aiRequest?.source ?? { kind: 'uncommitted' }}
+        onClose={() => setAiRequest(null)}
       />
     </div>
   )

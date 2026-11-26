@@ -8,6 +8,9 @@ const reviewApi = vi.hoisted(() => ({
   revert: vi.fn(),
   stageHunk: vi.fn(),
   unstageHunk: vi.fn(),
+  commit: vi.fn(),
+  push: vi.fn(),
+  sync: vi.fn(),
 }))
 
 const sessionsApi = vi.hoisted(() => ({
@@ -111,7 +114,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  useWorkspaceReviewStore.setState({ byKey: {} })
+  useWorkspaceReviewStore.setState({ byKey: {}, revisionBySession: {} })
   for (const mock of Object.values(reviewApi)) mock.mockReset()
   for (const mock of Object.values(sessionsApi)) mock.mockReset()
 })
@@ -816,4 +819,97 @@ it('invalidates persisted viewed marks when the server snapshot changes', async 
   expect(entry().viewedSnapshot).toBe('new-snapshot')
   await store().load(SESSION, UNSTAGED, { force: true })
   expect(entry().viewedPaths).toEqual(['src/a.ts'])
+})
+
+const UNCOMMITTED: WorkspaceReviewSource = { kind: 'uncommitted' }
+
+describe('commit', () => {
+  it('refuses without a loaded snapshot and never calls the API', async () => {
+    const result = await store().commit(SESSION, { message: 'feat: work' })
+    expect(result.state === 'refused' ? result.refusal : null).toBe('no_snapshot')
+    expect(reviewApi.commit).not.toHaveBeenCalled()
+  })
+
+  it('guards with the uncommitted snapshot even when the panel shows another comparison', async () => {
+    // HEAD + index + worktree is what a commit lands on, so the guard token
+    // comes from the canonical uncommitted entry, not the displayed staged one.
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNCOMMITTED)
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, STAGED)
+    reviewApi.commit.mockResolvedValueOnce({ state: 'ok', snapshot: 'snap-2', commit: 'abc1234', status: status('snap-2') })
+
+    await store().commit(SESSION, { message: 'feat: work' }, STAGED)
+
+    expect(reviewApi.commit).toHaveBeenCalledWith(SESSION, {
+      message: 'feat: work',
+      snapshot: 'snap-1',
+      source: STAGED,
+    })
+  })
+
+  it('re-seeds the refreshed comparison and drops the other working-tree caches', async () => {
+    // A commit rewrites HEAD, the left-hand side of every cached comparison.
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNCOMMITTED)
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNSTAGED)
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, BRANCH)
+    const refreshed = status('snap-2', { source: { kind: 'unstaged' }, files: [] })
+    reviewApi.commit.mockResolvedValueOnce({ state: 'ok', snapshot: 'snap-2', commit: 'abc1234', status: refreshed })
+
+    const result = await store().commit(SESSION, { message: 'feat: work' }, UNSTAGED)
+
+    expect(result.state).toBe('ok')
+    expect(entry(SESSION, UNSTAGED).status).toBe(refreshed)
+    expect(entry(SESSION, UNSTAGED).stale).toBe(false)
+    expect(entry(SESSION, UNCOMMITTED).status).toBeNull()
+    expect(entry(SESSION, BRANCH).status).toBeNull()
+    expect(store().revisionBySession[SESSION]).toBe(1)
+  })
+
+  it('reports a stale answer without pretending the commit landed', async () => {
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNCOMMITTED)
+    reviewApi.commit.mockResolvedValueOnce({ state: 'stale', snapshot: 'snap-9' })
+
+    const result = await store().commit(SESSION, { message: 'feat: work' })
+
+    expect(result.state).toBe('stale')
+    expect(entry(SESSION, UNCOMMITTED).stale).toBe(true)
+    expect(entry(SESSION, UNCOMMITTED).error).toBeNull()
+  })
+
+  it('refuses locally when the guard entry is already stale', async () => {
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNCOMMITTED)
+    reviewApi.commit.mockResolvedValueOnce({ state: 'stale', snapshot: 'snap-9' })
+    await store().commit(SESSION, { message: 'feat: first' })
+
+    const result = await store().commit(SESSION, { message: 'feat: second' })
+
+    expect(result.state).toBe('stale')
+    expect(reviewApi.commit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('remote operations', () => {
+  it('invalidates the session after push and sync so cached comparisons reload', async () => {
+    reviewApi.push.mockResolvedValueOnce({ state: 'ok' })
+    expect(await store().push(SESSION)).toEqual({ state: 'ok' })
+    expect(reviewApi.push).toHaveBeenCalledWith(SESSION)
+    expect(store().revisionBySession[SESSION]).toBe(1)
+
+    reviewApi.sync.mockResolvedValueOnce({ state: 'ok', pulled: 'updated' })
+    expect(await store().sync(SESSION)).toEqual({ state: 'ok', pulled: 'updated' })
+    expect(reviewApi.sync).toHaveBeenCalledWith(SESSION)
+    expect(store().revisionBySession[SESSION]).toBe(2)
+  })
+
+  it('invalidates even when the remote operation fails', async () => {
+    reviewApi.push.mockRejectedValueOnce(new Error('offline'))
+    await expect(store().push(SESSION)).rejects.toThrow('offline')
+    expect(store().revisionBySession[SESSION]).toBe(1)
+  })
 })

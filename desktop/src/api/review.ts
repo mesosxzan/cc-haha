@@ -1,4 +1,4 @@
-import { api, type ApiRequestOptions } from './client'
+import { api, ApiError, type ApiRequestOptions } from './client'
 
 /**
  * Typed client for the server-side Git review domain
@@ -157,6 +157,84 @@ export type ReviewHunkRequest = {
   source?: GitReviewSource
 }
 
+export type ReviewAiKind = 'review' | 'commit-message'
+
+/**
+ * Generation outcomes are answer states, not HTTP errors: the route answers
+ * `no_provider` / `provider_error` with a non-2xx status but the same body
+ * shape, and this client hands that body back so the panel can render each
+ * state with its own affordance.
+ */
+export type ReviewAiResult =
+  | {
+    state: 'ok'
+    kind: ReviewAiKind
+    source: ResolvedReviewSource
+    snapshot: string
+    text: string
+    /** Files whose diff text reached the model, out of `totalFiles`. */
+    includedFiles: number
+    totalFiles: number
+    /** Some diff text was cut to fit the prompt budget. */
+    truncated: boolean
+  }
+  | { state: 'no_changes'; kind: ReviewAiKind; source: ResolvedReviewSource; snapshot: string }
+  | { state: 'no_provider'; kind: ReviewAiKind; error: string }
+  | { state: 'provider_error'; kind: ReviewAiKind; reason: string; message: string }
+  | { state: 'error'; kind: ReviewAiKind; error: string }
+
+export type ReviewAiRequest = {
+  kind: ReviewAiKind
+  source: GitReviewSource
+  providerId?: string
+  /** Response language for review findings, e.g. "Chinese". */
+  language?: string
+}
+
+export type ReviewCommitRequest = {
+  message: string
+  /** Rewrite `HEAD` instead of adding a commit on top of it. */
+  amend?: boolean
+  snapshot: string
+  source?: GitReviewSource
+}
+
+export type ReviewCommitResult = {
+  state: ReviewState | 'stale'
+  snapshot: string
+  outcome?: 'nothing_to_commit' | 'no_head' | 'conflicted'
+  commit?: string
+  status?: ReviewStatusResult
+  error?: string
+}
+
+/** Push/sync answer with a state, not an HTTP error, so the panel can render it. */
+export type ReviewRemoteResult = {
+  state: 'ok' | 'error'
+  pulled?: 'up_to_date' | 'updated'
+  error?: string
+}
+
+export type ReviewSyncState = {
+  state: ReviewState
+  branch: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  error?: string
+}
+
+/** Server whole-call budget is 90s; leave the client headroom above it. */
+const REVIEW_AI_TIMEOUT_MS = 120_000
+/** Server remote budget is 60s per git command; sync runs two of them. */
+const REVIEW_REMOTE_TIMEOUT_MS = 150_000
+
+function isReviewAiResult(value: unknown): value is ReviewAiResult {
+  if (!value || typeof value !== 'object') return false
+  const state = (value as { state?: unknown }).state
+  return state === 'no_provider' || state === 'provider_error' || state === 'error'
+}
+
 function buildSourceQuery(source: GitReviewSource): URLSearchParams {
   const query = new URLSearchParams({ source: source.kind })
   if (source.kind === 'branch') query.set('baseRef', source.baseRef)
@@ -214,5 +292,45 @@ export const reviewApi = {
    */
   revert(sessionId: string, request: ReviewPathsRequest) {
     return api.post<ReviewWriteResult>(reviewPath(sessionId, '/revert'), request)
+  },
+
+  /** Commit exactly what is in the index, guarded by the snapshot token. */
+  commit(sessionId: string, request: ReviewCommitRequest) {
+    return api.post<ReviewCommitResult>(reviewPath(sessionId, '/commit'), request)
+  },
+
+  /** Push `HEAD` to its upstream, publishing the branch to origin once. */
+  push(sessionId: string) {
+    return api.post<ReviewRemoteResult>(reviewPath(sessionId, '/push'), {}, { timeout: REVIEW_REMOTE_TIMEOUT_MS })
+  },
+
+  /** Pull with rebase, then push. */
+  sync(sessionId: string) {
+    return api.post<ReviewRemoteResult>(reviewPath(sessionId, '/sync'), {}, { timeout: REVIEW_REMOTE_TIMEOUT_MS })
+  },
+
+  getSyncState(sessionId: string, options?: ApiRequestOptions) {
+    return api.get<ReviewSyncState>(reviewPath(sessionId, '/sync-state'), options)
+  },
+
+  /**
+   * AI code review / commit message for one explicit comparison. Text
+   * generation only — this never stages or commits anything.
+   */
+  async aiGenerate(
+    sessionId: string,
+    request: ReviewAiRequest,
+    options?: ApiRequestOptions,
+  ): Promise<ReviewAiResult> {
+    try {
+      return await api.post<ReviewAiResult>(
+        reviewPath(sessionId, '/ai-generate'),
+        request,
+        { timeout: REVIEW_AI_TIMEOUT_MS, ...options },
+      )
+    } catch (error) {
+      if (error instanceof ApiError && isReviewAiResult(error.body)) return error.body
+      throw error
+    }
   },
 }

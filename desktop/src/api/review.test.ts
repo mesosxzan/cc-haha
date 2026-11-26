@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getDefaultBaseUrl, setBaseUrl } from './client'
+import { ApiError, getDefaultBaseUrl, setBaseUrl } from './client'
 import { reviewApi } from './review'
 
 const BASE = 'http://127.0.0.1:49241'
@@ -98,5 +98,97 @@ describe('reviewApi', () => {
       expect(requestedUrl(fetchMock)).toBe(`${BASE}/api/sessions/s/review/${endpoint}`)
       vi.restoreAllMocks()
     }
+  })
+
+  it('posts the message, amend flag and snapshot token to commit', async () => {
+    setBaseUrl(BASE)
+    const fetchMock = mockFetch({ state: 'ok', snapshot: 'v2', commit: 'abc1234' })
+
+    await reviewApi.commit('session-1', {
+      message: 'feat: work',
+      amend: true,
+      snapshot: 'v1',
+      source: { kind: 'unstaged' },
+    })
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/api/sessions/session-1/review/commit`)
+    const init = requestedInit(fetchMock)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      message: 'feat: work',
+      amend: true,
+      snapshot: 'v1',
+      source: { kind: 'unstaged' },
+    })
+  })
+
+  it('posts push and sync to their own endpoints', async () => {
+    setBaseUrl(BASE)
+
+    for (const endpoint of ['push', 'sync'] as const) {
+      const fetchMock = mockFetch({ state: 'ok' })
+      await reviewApi[endpoint]('s')
+      expect(requestedUrl(fetchMock)).toBe(`${BASE}/api/sessions/s/review/${endpoint}`)
+      expect(requestedInit(fetchMock).method).toBe('POST')
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('reads the sync state with a plain GET', async () => {
+    setBaseUrl(BASE)
+    const fetchMock = mockFetch({ state: 'ok', branch: 'main', upstream: 'origin/main', ahead: 2, behind: 1 })
+
+    const result = await reviewApi.getSyncState('session-1')
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/api/sessions/session-1/review/sync-state`)
+    expect(requestedInit(fetchMock).method ?? 'GET').toBe('GET')
+    expect(result).toEqual({ state: 'ok', branch: 'main', upstream: 'origin/main', ahead: 2, behind: 1 })
+  })
+
+  it('posts the kind and explicit source to ai-generate with generation headroom', async () => {
+    setBaseUrl(BASE)
+    const fetchMock = mockFetch({ state: 'ok', kind: 'review', text: 'fine', includedFiles: 1, totalFiles: 1, truncated: false })
+
+    const result = await reviewApi.aiGenerate('session-1', {
+      kind: 'review',
+      source: { kind: 'branch', baseRef: 'main' },
+      language: 'Chinese',
+    })
+
+    expect(requestedUrl(fetchMock)).toBe(`${BASE}/api/sessions/session-1/review/ai-generate`)
+    const init = requestedInit(fetchMock)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      kind: 'review',
+      source: { kind: 'branch', baseRef: 'main' },
+      language: 'Chinese',
+    })
+    expect(result.state).toBe('ok')
+  })
+
+  it('returns the answer-state body from a non-2xx generation response', async () => {
+    setBaseUrl(BASE)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
+      JSON.stringify({ state: 'no_provider', kind: 'commit-message', error: 'No saved provider is available for AI generation' }),
+      { status: 409, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    const result = await reviewApi.aiGenerate('session-1', { kind: 'commit-message', source: { kind: 'staged' } })
+    expect(result).toEqual({
+      state: 'no_provider',
+      kind: 'commit-message',
+      error: 'No saved provider is available for AI generation',
+    })
+  })
+
+  it('still throws when a non-2xx body is not a generation answer', async () => {
+    setBaseUrl(BASE)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: 'BAD_REQUEST', message: 'kind must be "review" or "commit-message"' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    await expect(reviewApi.aiGenerate('session-1', { kind: 'review', source: { kind: 'unstaged' } }))
+      .rejects.toBeInstanceOf(ApiError)
   })
 })

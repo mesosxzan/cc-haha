@@ -263,7 +263,12 @@ describe('Issue #1989 frontend bottlenecks (repro)', () => {
     const startedAt = performance.now()
     const view = render(<WorkspaceReviewTab sessionId={SESSION} tab={createReviewTab()} />)
     await waitFor(() => {
-      expect(mocks.reviewGetStatus).toHaveBeenCalledTimes(1)
+      // The commit box also loads the `uncommitted` guard comparison; count
+      // only reads of the displayed one.
+      const displayedReads = mocks.reviewGetStatus.mock.calls.filter(
+        ([, requested]) => (requested as { kind: string }).kind === 'unstaged',
+      )
+      expect(displayedReads).toHaveLength(1)
       expect(view.container.querySelectorAll('section[data-testid^="workspace-review-section-"]').length).toBeGreaterThan(0)
     })
     const elapsedMs = Math.round(performance.now() - startedAt)
