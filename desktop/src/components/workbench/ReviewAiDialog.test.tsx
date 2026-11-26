@@ -77,7 +77,7 @@ describe('ReviewAiDialog', () => {
     expect(screen.getByRole('button', { name: '复制审查结果' })).toBeInTheDocument()
   })
 
-  it('shows a commit message as copyable plain text, without a language request', async () => {
+  it('shows a commit message as copyable plain text, requesting English by default', async () => {
     reviewApi.aiGenerate.mockResolvedValue(okResult({
       kind: 'commit-message',
       text: 'feat(review): add AI generation',
@@ -90,9 +90,23 @@ describe('ReviewAiDialog', () => {
     expect(screen.getByRole('button', { name: 'Copy message' })).toBeInTheDocument()
     expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
       'session-a',
-      { kind: 'commit-message', source: { kind: 'staged' } },
+      { kind: 'commit-message', source: { kind: 'staged' }, language: 'English' },
       expect.anything(),
     )
+  })
+
+  it('regenerates the commit message in Chinese when the language selector changes', async () => {
+    reviewApi.aiGenerate.mockResolvedValue(okResult({ kind: 'commit-message', text: 'feat(review): message', includedFiles: 1, totalFiles: 1 }))
+    renderDialog({ kind: 'commit-message', source: { kind: 'staged' } })
+    await screen.findByText('feat(review): message')
+
+    fireEvent.change(screen.getByTestId('review-ai-language'), { target: { value: 'zh' } })
+
+    await waitFor(() => expect(reviewApi.aiGenerate).toHaveBeenCalledWith(
+      'session-a',
+      { kind: 'commit-message', source: { kind: 'staged' }, language: 'Chinese' },
+      expect.anything(),
+    ))
   })
 
   it('renders the no-provider state with its own guidance and a retry', async () => {

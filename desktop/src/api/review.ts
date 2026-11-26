@@ -294,9 +294,13 @@ export const reviewApi = {
     return api.post<ReviewWriteResult>(reviewPath(sessionId, '/revert'), request)
   },
 
-  /** Commit exactly what is in the index, guarded by the snapshot token. */
-  commit(sessionId: string, request: ReviewCommitRequest) {
-    return api.post<ReviewCommitResult>(reviewPath(sessionId, '/commit'), request)
+  /**
+   * Commit exactly what is in the index, guarded by the snapshot token.
+   * Aborting the signal stops waiting for the answer — it cannot un-commit a
+   * git process that already finished, so callers must re-read state after.
+   */
+  commit(sessionId: string, request: ReviewCommitRequest, options?: ApiRequestOptions) {
+    return api.post<ReviewCommitResult>(reviewPath(sessionId, '/commit'), request, options)
   },
 
   /** Push `HEAD` to its upstream, publishing the branch to origin once. */

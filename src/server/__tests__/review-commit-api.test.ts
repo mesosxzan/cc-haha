@@ -154,6 +154,38 @@ describe('review commit route', () => {
     expect(git(repoDir, 'log', '-1', '--format=%s').trim()).toBe('initial')
   })
 
+  it('kills the git commit when the caller aborts a slow hook and reports the cancellation', async () => {
+    const repoDir = await createRepo()
+    // A pre-commit hook that sleeps simulates slow hooks: the abort must kill
+    // the git process instead of letting the commit land unobserved.
+    const hookPath = path.join(repoDir, '.git', 'hooks', 'pre-commit')
+    await fs.writeFile(hookPath, '#!/bin/sh\nsleep 5\n', { mode: 0o755 })
+    await fs.writeFile(path.join(repoDir, 'tracked.txt'), 'one\ntwo\nthree\n')
+    git(repoDir, 'add', 'tracked.txt')
+    const { sessionId } = await sessionService.createSession(repoDir)
+    const snapshot = await snapshotOf(sessionId)
+
+    const controller = new AbortController()
+    const target = `${BASE}/api/sessions/${sessionId}/review/commit`
+    const url = new URL(target)
+    const pending = handleSessionsApi(new Request(target, {
+      method: 'POST',
+      body: JSON.stringify({ message: 'should be cancelled', snapshot }),
+      headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
+    }), url, url.pathname.split('/').filter(Boolean))
+    // Abort once the request is in flight (the hook holds git for 5s).
+    setTimeout(() => controller.abort(), 300)
+    const res = await pending
+    const body = await res.json() as { state: string; error?: string }
+    expect(body.state).toBe('error')
+    expect(body.error).toBe('Commit cancelled')
+    // The kill landed while the hook was still sleeping: nothing committed.
+    expect(git(repoDir, 'log', '-1', '--format=%s').trim()).toBe('initial')
+    // The index is intact, so the user can retry the commit.
+    expect(git(repoDir, 'diff', '--cached', '--name-only').trim()).toBe('tracked.txt')
+  }, 15_000)
+
   it('refuses to commit unmerged paths', async () => {
     const repoDir = await createRepo()
     git(repoDir, 'checkout', '-q', '-b', 'side')

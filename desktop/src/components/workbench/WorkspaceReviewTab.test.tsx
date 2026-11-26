@@ -294,6 +294,37 @@ describe('comparison picker', () => {
   })
 })
 
+describe('toolbar stage all', () => {
+  it('stages tracked changes from the SCM header without sweeping untracked files', async () => {
+    await renderReview()
+    reviewApi.stage.mockResolvedValue(writeResult())
+
+    fireEvent.click(screen.getByTestId('workspace-review-toolbar-stage-all'))
+
+    await waitFor(() => expect(reviewApi.stage).toHaveBeenCalled())
+    // The staged file is already in the index; the untracked one stays out.
+    expect(pathsOf(reviewApi.stage.mock.calls[0])).toEqual([MODIFIED, STAGED_FILE])
+  })
+
+  it('unstages everything from the header on the staged comparison', async () => {
+    await renderReview({ source: { kind: 'staged' } })
+    reviewApi.unstage.mockResolvedValue(writeResult())
+
+    const button = screen.getByTestId('workspace-review-toolbar-stage-all')
+    expect(button).toHaveAccessibleName('Unstage all')
+    fireEvent.click(button)
+
+    await waitFor(() => expect(reviewApi.unstage).toHaveBeenCalled())
+    expect(pathsOf(reviewApi.unstage.mock.calls[0])).toEqual([MODIFIED, STAGED_FILE, UNTRACKED])
+  })
+
+  it('hides the header action on read-only comparisons and without changes', async () => {
+    reviewApi.getStatus.mockResolvedValue(status({ source: { kind: 'branch', baseRef: 'main', resolvedBase: 'abc123' } }))
+    await renderReview({ source: { kind: 'branch', baseRef: 'main' }, defaultBranchRef: 'main' })
+    expect(screen.queryByTestId('workspace-review-toolbar-stage-all')).not.toBeInTheDocument()
+  })
+})
+
 describe('bulk actions', () => {
   it('stages every changed file, untracked ones included', async () => {
     // Staging an untracked file is additive and reversible — it is exactly what
@@ -862,7 +893,7 @@ describe('review safety regressions', () => {
     expect(section.queryByRole('button', { name: 'Stage file' })).toBeNull()
     expect(section.queryByRole('button', { name: 'Discard changes' })).toBeNull()
     expect(screen.queryByTestId('workspace-review-revert-all')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Unstage all' }))
+    fireEvent.click(screen.getByTestId('workspace-review-unstage-all'))
     await waitFor(() => expect(reviewApi.unstage).toHaveBeenCalledTimes(2))
     expect(reviewApi.stage).not.toHaveBeenCalled()
     expect(reviewApi.revert).not.toHaveBeenCalled()
@@ -1182,7 +1213,7 @@ describe('commit box wiring', () => {
     await waitFor(() => expect(reviewApi.commit).toHaveBeenCalledWith(SESSION, expect.objectContaining({
       message: 'feat: from the panel',
       snapshot: 'snap-1',
-    })))
+    }), expect.anything()))
   })
 
   it('keeps the commit box off read-only comparisons', async () => {

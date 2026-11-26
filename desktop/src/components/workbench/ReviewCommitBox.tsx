@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, GitCommitHorizontal, RefreshCw } from 'lucide-react'
+import { Check, ChevronDown, GitCommitHorizontal, RefreshCw, X } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { IconButton } from '@/components/ui/IconButton'
 import { Spinner } from '@/components/ui/Spinner'
 import { TextArea } from '@/components/ui/TextArea'
+import { SelectField } from '@/components/ui/SelectField'
 import { useDismissable } from '@/hooks/useDismissable'
 import { detectPlatform } from '@/lib/workspace/shortcuts'
 import { useTranslation } from '../../i18n'
@@ -44,6 +45,11 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
   const [syncState, setSyncState] = useState<ReviewSyncState | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const menuTriggerRef = useRef<HTMLButtonElement>(null)
+  const commitAbortRef = useRef<AbortController | null>(null)
+  const aiAbortRef = useRef<AbortController | null>(null)
+  // English by default: commit messages are read by tooling and teammates
+  // beyond the author's locale. The choice is per-box, not persisted.
+  const [aiLanguage, setAiLanguage] = useState<'en' | 'zh'>('en')
   const revision = useWorkspaceReviewStore((state) => state.revisionBySession[sessionId] ?? 0)
   const shortcutLabel = detectPlatform() === 'mac' ? '⌘↵' : 'Ctrl+↵'
 
@@ -76,7 +82,20 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
     return result.state === 'ok'
   }
 
+  /**
+   * Cancelling aborts the request; the server kills the git process, but the
+   * kill can land after git finished. The catch path therefore refreshes the
+   * comparison instead of asserting nothing was committed.
+   */
+  const cancelCommit = () => {
+    commitAbortRef.current?.abort()
+  }
+
   const runCommit = async (chosen: CommitAction) => {
+    if (busy === 'commit') {
+      cancelCommit()
+      return
+    }
     if (busy || !enabled) return
     const text = message.trim()
     if (!text) {
@@ -85,6 +104,8 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
     }
     setBusy('commit')
     setError(null)
+    const abort = new AbortController()
+    commitAbortRef.current = abort
     try {
       const store = useWorkspaceReviewStore.getState()
       const guard = store.getEntry(sessionId, { kind: 'uncommitted' })
@@ -111,6 +132,7 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
         sessionId,
         { message: text, ...(chosen === 'amend' ? { amend: true } : {}) },
         source,
+        { signal: abort.signal },
       )
       if (result.state === 'refused') {
         setError(t(result.refusal === 'no_snapshot' ? 'workspace.review.refusedNoSnapshot' : 'workspace.review.readOnlySource'))
@@ -132,28 +154,53 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
       if (chosen === 'commit-push') await runRemote('push')
       if (chosen === 'commit-sync') await runRemote('sync')
       await refreshSyncState()
+    } catch (caught) {
+      if (abort.signal.aborted) {
+        // The commit may still have landed between the click and the kill;
+        // re-read instead of trusting either outcome.
+        setError(t('workspace.review.commitCancelled'))
+        await useWorkspaceReviewStore.getState().load(sessionId, source, { force: true }).catch(() => {})
+        await refreshSyncState()
+      } else {
+        setError(caught instanceof Error ? caught.message : t('workspace.review.remoteFailed'))
+      }
     } finally {
+      commitAbortRef.current = null
       setBusy(null)
     }
   }
 
   const fillWithAi = async () => {
+    if (busy === 'ai') {
+      aiAbortRef.current?.abort()
+      return
+    }
     if (busy) return
     setBusy('ai')
     setError(null)
+    const abort = new AbortController()
+    aiAbortRef.current = abort
     try {
       const stagedSource = useWorkspaceReviewStore.getState().getEntry(sessionId, { kind: 'staged' })
       const target = stagedSource.status?.files.length
         ? { kind: 'staged' } as const
         : { kind: 'uncommitted' } as const
-      const result = await reviewApi.aiGenerate(sessionId, { kind: 'commit-message', source: target })
+      const result = await reviewApi.aiGenerate(
+        sessionId,
+        { kind: 'commit-message', source: target, language: aiLanguage === 'zh' ? 'Chinese' : 'English' },
+        { signal: abort.signal },
+      )
       if (result.state === 'ok') setMessage(result.text)
       else if (result.state === 'no_changes') setError(t('workspace.review.empty'))
       else if (result.state === 'no_provider') setError(t('workspace.review.aiNoProvider'))
       else setError('message' in result ? result.message : result.error)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t('workspace.review.remoteFailed'))
+      // A user cancel is not a failure: keep whatever message was there.
+      if (!abort.signal.aborted) {
+        setError(caught instanceof Error ? caught.message : t('workspace.review.remoteFailed'))
+      }
     } finally {
+      aiAbortRef.current = null
       setBusy(null)
     }
   }
@@ -206,21 +253,19 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
           }}
         />
         <span className="absolute right-1.5 top-1.5">
-          {busy === 'ai' ? (
-            <span data-testid="workspace-review-commit-ai-loading" className="flex h-6 w-6 items-center justify-center">
-              <Spinner size={13} label={t('workspace.review.aiGenerating')} />
-            </span>
-          ) : (
-            <IconButton
-              icon={<GitCommitHorizontal size={14} strokeWidth={1.75} />}
-              label={t('workspace.review.aiCommitMessage')}
-              size="sm"
-              tone="muted"
-              data-testid="workspace-review-commit-ai"
-              disabled={busy !== null}
-              onClick={() => { void fillWithAi() }}
-            />
-          )}
+          {/* While generating, the same button cancels the request. */}
+          <IconButton
+            icon={busy === 'ai'
+              ? <X size={14} strokeWidth={1.75} />
+              : <GitCommitHorizontal size={14} strokeWidth={1.75} />}
+            label={t(busy === 'ai' ? 'workspace.review.aiCancel' : 'workspace.review.aiCommitMessage')}
+            size="sm"
+            tone="muted"
+            aria-busy={busy === 'ai' || undefined}
+            data-testid={busy === 'ai' ? 'workspace-review-commit-ai-loading' : 'workspace-review-commit-ai'}
+            disabled={busy !== null && busy !== 'ai'}
+            onClick={() => { void fillWithAi() }}
+          />
         </span>
       </div>
 
@@ -230,18 +275,31 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
               Button's radius via className would leave two rounded-* classes
               fighting over stylesheet order (components/AGENTS.md §3.6). */}
           <span className="flex min-w-0 flex-1 overflow-hidden rounded-[var(--radius-md)]">
+          {/* While committing, the same button becomes the cancel affordance:
+              `loading` would disable it, so the spinner is rendered by hand. */}
           <Button
             variant="primary"
             size="base"
             block
-            icon={amend ? undefined : <Check size={14} strokeWidth={1.75} aria-hidden="true" />}
-            loading={busy === 'commit'}
-            disabled={!enabled || busy !== null}
+            icon={busy === 'commit'
+              ? <X size={14} strokeWidth={1.75} aria-hidden="true" />
+              : amend ? undefined : <Check size={14} strokeWidth={1.75} aria-hidden="true" />}
+            aria-busy={busy === 'commit' || undefined}
+            disabled={busy === 'commit' ? false : !enabled || busy !== null}
             data-testid="workspace-review-commit-primary"
             onClick={() => { void runCommit(action) }}
           >
-            <span className="truncate">{primaryLabel}</span>
-            <span aria-hidden="true" className="ml-1 text-[11px] opacity-70">{shortcutLabel}</span>
+            {busy === 'commit' ? (
+              <>
+                <Spinner size={13} label={t('workspace.review.commitCancel')} />
+                <span className="truncate">{t('workspace.review.commitCancel')}</span>
+              </>
+            ) : (
+              <>
+                <span className="truncate">{primaryLabel}</span>
+                <span aria-hidden="true" className="ml-1 text-[11px] opacity-70">{shortcutLabel}</span>
+              </>
+            )}
           </Button>
           <button
             ref={menuTriggerRef}
@@ -286,6 +344,19 @@ export function ReviewCommitBox({ sessionId, source, enabled }: ReviewCommitBoxP
             </div>
           ) : null}
         </span>
+        <SelectField<'en' | 'zh'>
+          label={t('workspace.review.aiLanguage')}
+          labelHidden
+          size="sm"
+          value={aiLanguage}
+          disabled={busy !== null}
+          data-testid="workspace-review-commit-ai-language"
+          options={[
+            { value: 'en', label: t('workspace.review.aiLanguageEnglish') },
+            { value: 'zh', label: t('workspace.review.aiLanguageChinese') },
+          ]}
+          onChange={setAiLanguage}
+        />
         {syncState?.upstream && (syncState.ahead > 0 || syncState.behind > 0) ? (
           <Button
             variant="secondary"

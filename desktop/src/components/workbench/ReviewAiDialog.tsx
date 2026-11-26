@@ -3,6 +3,7 @@ import { CircleAlert, CircleCheck, GitCommitHorizontal, ScanSearch } from 'lucid
 import { Modal } from '@/components/ui/Modal'
 import { Button } from '@/components/ui/Button'
 import { CopyButton } from '@/components/ui/CopyButton'
+import { SelectField } from '@/components/ui/SelectField'
 import { Spinner } from '@/components/ui/Spinner'
 import { MarkdownRenderer } from '@/components/markdown/MarkdownRenderer'
 import { useTranslation } from '../../i18n'
@@ -54,6 +55,9 @@ export function ReviewAiDialog({
   const [result, setResult] = useState<ReviewAiResult | null>(null)
   const [transportError, setTransportError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
+  // Commit messages default to English regardless of UI locale; the user can
+  // switch to Chinese. Changing it regenerates through the attempt counter.
+  const [messageLanguage, setMessageLanguage] = useState<'en' | 'zh'>('en')
   const controllerRef = useRef<AbortController | null>(null)
 
   const sourceKey = JSON.stringify(source)
@@ -71,7 +75,9 @@ export function ReviewAiDialog({
     void reviewApi.aiGenerate(sessionId, {
       kind,
       source: JSON.parse(sourceKey) as GitReviewSource,
-      ...(kind === 'review' ? { language: reviewLanguageForLocale(locale) } : {}),
+      ...(kind === 'review'
+        ? { language: reviewLanguageForLocale(locale) }
+        : { language: messageLanguage === 'zh' ? 'Chinese' : 'English' }),
     }, { signal: controller.signal }).then(
       (answer) => {
         if (controller.signal.aborted) return
@@ -88,7 +94,7 @@ export function ReviewAiDialog({
     // `locale` is read at request time only; switching language mid-dialog
     // must not silently regenerate.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, kind, sessionId, sourceKey, attempt])
+  }, [open, kind, sessionId, sourceKey, attempt, messageLanguage])
 
   const title = t(kind === 'review' ? 'workspace.review.aiReviewTitle' : 'workspace.review.aiCommitTitle')
   const close = () => {
@@ -109,6 +115,21 @@ export function ReviewAiDialog({
       width={kind === 'review' ? 720 : 560}
       footer={(
         <>
+          {kind === 'commit-message' ? (
+            <SelectField<'en' | 'zh'>
+              label={t('workspace.review.aiLanguage')}
+              labelHidden
+              size="sm"
+              containerClassName="mr-auto"
+              value={messageLanguage}
+              data-testid="review-ai-language"
+              options={[
+                { value: 'en', label: t('workspace.review.aiLanguageEnglish') },
+                { value: 'zh', label: t('workspace.review.aiLanguageChinese') },
+              ]}
+              onChange={setMessageLanguage}
+            />
+          ) : null}
           {result?.state === 'ok' ? (
             <CopyButton
               text={result.text}

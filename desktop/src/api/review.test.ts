@@ -122,6 +122,20 @@ describe('reviewApi', () => {
     })
   })
 
+  it('aborts an in-flight commit when the caller signal fires', async () => {
+    setBaseUrl(BASE)
+    const controller = new AbortController()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')))
+    }))
+
+    const pending = reviewApi.commit('session-1', { message: 'feat: work', snapshot: 'v1' }, { signal: controller.signal })
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('posts push and sync to their own endpoints', async () => {
     setBaseUrl(BASE)
 

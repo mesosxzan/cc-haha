@@ -995,7 +995,7 @@ export class ReviewService {
    * (the panel stages first through the normal snapshot-guarded write), so this
    * never quietly widens the commit beyond what the user staged.
    */
-  async commit(sessionId: string, request: ReviewCommitRequest): Promise<ReviewCommitResult> {
+  async commit(sessionId: string, request: ReviewCommitRequest, signal?: AbortSignal): Promise<ReviewCommitResult> {
     const message = typeof request.message === 'string' ? request.message.trim() : ''
     if (!message) return { state: 'error', snapshot: '', error: 'Commit message is required' }
     if (typeof request.snapshot !== 'string' || request.snapshot.length === 0) {
@@ -1035,7 +1035,13 @@ export class ReviewService {
     // a failing pre-commit hook is a real refusal the user must see, not
     // something to bypass.
     const args = ['commit', ...(request.amend ? ['--amend'] : []), '-m', message]
-    const result = await this.runGit(ctx.repoRoot, args)
+    const result = await this.runGit(ctx.repoRoot, args, GIT_TIMEOUT_MS, signal)
+    if (signal?.aborted) {
+      // The user cancelled. The kill may have landed after git already
+      // finished, so report the cancellation honestly; the caller re-reads
+      // state instead of trusting that nothing happened.
+      return { state: 'error', snapshot, error: 'Commit cancelled' }
+    }
     if (result.code !== 0) {
       return {
         state: 'error',
@@ -2185,7 +2191,7 @@ export class ReviewService {
     return env
   }
 
-  private async runGit(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<GitCommandResult> {
+  private async runGit(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS, signal?: AbortSignal): Promise<GitCommandResult> {
     // `core.quotePath=false` keeps non-ASCII paths as UTF-8 instead of the
     // C-quoted `"\303\251.txt"` form. A quoted path in patch text made
     // `collectPatchPaths` validate a filename that does not exist, while
@@ -2199,6 +2205,7 @@ export class ReviewService {
         maxBuffer: MAX_GIT_BUFFER_BYTES,
         encoding: 'utf8',
         env: this.buildGitEnv(),
+        ...(signal ? { signal } : {}),
       })
       return { stdout: result.stdout, stderr: result.stderr, code: 0 }
     } catch (error) {

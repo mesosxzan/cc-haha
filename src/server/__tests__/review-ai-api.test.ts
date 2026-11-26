@@ -168,6 +168,33 @@ describe('review ai-generate route', () => {
     }
   })
 
+  it('asks for the requested commit-message language and defaults to English', async () => {
+    const repoDir = await createRepo()
+    git(repoDir, 'add', 'tracked.txt')
+    const { sessionId } = await sessionService.createSession(repoDir)
+    const provider = await startProvider('feat(review): 添加第三行')
+    try {
+      const chinese = await call('POST', '/ai-generate', sessionId, {
+        kind: 'commit-message',
+        source: { kind: 'staged' },
+        providerId: provider.providerId,
+        language: 'Chinese',
+      })
+      expect(chinese.status).toBe(200)
+      expect(JSON.stringify(provider.requests[0]!.messages)).toContain('Write the commit message in Chinese')
+
+      const english = await call('POST', '/ai-generate', sessionId, {
+        kind: 'commit-message',
+        source: { kind: 'staged' },
+        providerId: provider.providerId,
+      })
+      expect(english.status).toBe(200)
+      expect(JSON.stringify(provider.requests[1]!.messages)).toContain('Write the commit message in English')
+    } finally {
+      provider.server.stop(true)
+    }
+  })
+
   it('answers no_changes without calling the provider when the source is clean', async () => {
     const repoDir = await createRepo()
     git(repoDir, 'checkout', '--', 'tracked.txt')

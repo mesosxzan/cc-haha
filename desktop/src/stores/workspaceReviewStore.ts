@@ -170,6 +170,7 @@ type WorkspaceReviewStore = {
     sessionId: string,
     request: { message: string; amend?: boolean },
     source?: WorkspaceReviewSource,
+    options?: { signal?: AbortSignal },
   ) => Promise<ReviewCommitResult | WorkspaceReviewRefusal>
   /** Remote operations invalidate every cached comparison for the session. */
   push: (sessionId: string) => Promise<ReviewRemoteResult>
@@ -412,7 +413,7 @@ export const useWorkspaceReviewStore = create<WorkspaceReviewStore>((set, get) =
   stageHunk: (sessionId, source, patch) => runHunkWrite(set, get, sessionId, source, patch, 'stageHunk'),
   unstageHunk: (sessionId, source, patch) => runHunkWrite(set, get, sessionId, source, patch, 'unstageHunk'),
 
-  commit: (sessionId, request, source) => runCommit(set, get, sessionId, request, source),
+  commit: (sessionId, request, source, options) => runCommit(set, get, sessionId, request, source, options),
   push: (sessionId) => withReviewWrite(sessionId, () => reviewApi.push(sessionId)),
   sync: (sessionId) => withReviewWrite(sessionId, () => reviewApi.sync(sessionId)),
 
@@ -539,6 +540,7 @@ async function runCommit(
   sessionId: string,
   request: { message: string; amend?: boolean },
   source?: WorkspaceReviewSource,
+  options?: { signal?: AbortSignal },
 ): Promise<ReviewCommitResult | WorkspaceReviewRefusal> {
   // The snapshot guard describes HEAD + index + worktree, so it is taken from
   // the canonical `uncommitted` entry the commit box keeps loaded — whatever
@@ -556,7 +558,7 @@ async function runCommit(
     ...request,
     snapshot,
     source: refreshSource as GitReviewSource,
-  }))
+  }, { signal: options?.signal }))
 
   // A commit rewrites HEAD, the left-hand side of every working-tree and
   // branch comparison, so all of them are stale now — drop them and let the

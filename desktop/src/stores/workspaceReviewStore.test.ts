@@ -845,7 +845,7 @@ describe('commit', () => {
       message: 'feat: work',
       snapshot: 'snap-1',
       source: STAGED,
-    })
+    }, { signal: undefined })
   })
 
   it('re-seeds the refreshed comparison and drops the other working-tree caches', async () => {
@@ -867,6 +867,17 @@ describe('commit', () => {
     expect(entry(SESSION, UNCOMMITTED).status).toBeNull()
     expect(entry(SESSION, BRANCH).status).toBeNull()
     expect(store().revisionBySession[SESSION]).toBe(1)
+  })
+
+  it('hands the caller signal to the API so a cancel reaches the request', async () => {
+    reviewApi.getStatus.mockResolvedValueOnce(status('snap-1'))
+    await store().load(SESSION, UNCOMMITTED)
+    reviewApi.commit.mockResolvedValueOnce({ state: 'ok', snapshot: 'snap-2' })
+    const controller = new AbortController()
+
+    await store().commit(SESSION, { message: 'feat: work' }, undefined, { signal: controller.signal })
+
+    expect(reviewApi.commit).toHaveBeenCalledWith(SESSION, expect.objectContaining({ message: 'feat: work' }), { signal: controller.signal })
   })
 
   it('reports a stale answer without pretending the commit landed', async () => {

@@ -35,7 +35,7 @@ export type ReviewAiRequest = {
   source: ReviewAiSource
   /** Saved provider to use; falls back to the active provider when omitted. */
   providerId?: string | null
-  /** Response language for review findings, e.g. "Chinese". English when omitted. */
+  /** Response language, e.g. "Chinese". English when omitted; applies to both kinds. */
   language?: string
   signal?: AbortSignal
 }
@@ -94,7 +94,7 @@ const COMMIT_MESSAGE_SYSTEM_PROMPT = [
   'You write Git commit messages for the exact set of changes shown in the unified diffs.',
   'Follow the Conventional Commits format: `type(scope): subject` where type is one of feat, fix, refactor, perf, docs, test, build, ci, chore, style, revert.',
   'Rules:',
-  '- Subject in English, imperative mood, no trailing period, at most 72 characters.',
+  '- Subject in the language the user prompt asks for (English by default), imperative mood, no trailing period, at most 72 characters.',
   '- Choose the scope from the dominant area of the change; omit it when the change is cross-cutting.',
   '- When the change is non-trivial, add a blank line and a short body of `- ` bullets explaining why the change was made, wrapped at 72 columns.',
   '- Describe only what the diffs actually show; never invent motivation.',
@@ -267,7 +267,7 @@ function buildUserPrompt(
       : `${source.kind} changes`
   const languageLine = kind === 'review'
     ? `Write the review in ${sanitizeLanguage(language) ?? 'English'}. Keep code identifiers, paths and commit types in their original form.`
-    : 'Write the commit message in English.'
+    : `Write the commit message in ${sanitizeLanguage(language) ?? 'English'}. Keep the Conventional Commits type and scope in English regardless of the message language.`
 
   const task = kind === 'review'
     ? 'Review the following changes.'

@@ -940,7 +940,7 @@ async function handleSessionReviewRoute(
     }
     const source = body.source === undefined ? undefined : parseReviewWriteSource(body.source)
     return await runReviewRequest(() =>
-      reviewService.commit(sessionId, { message, amend, snapshot, source }),
+      reviewService.commit(sessionId, { message, amend, snapshot, source }, req.signal),
     )
   }
 

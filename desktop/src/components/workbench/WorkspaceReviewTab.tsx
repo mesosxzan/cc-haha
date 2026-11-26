@@ -17,6 +17,7 @@ import {
   History,
   List,
   ListFilter,
+  Minus,
   Plus,
   RefreshCw,
   ScanSearch,
@@ -663,6 +664,25 @@ export function WorkspaceReviewTab({
         ) : null}
 
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {/* The SCM header's bulk (un)stage, as in the reference client. It
+              only sweeps tracked changes; including untracked files stays an
+              explicit choice on the floating bulk bar. */}
+          {writable && source.kind !== 'turn' && files.length > 0 ? (
+            <IconButton
+              icon={source.kind === 'staged' ? <Minus size={14} strokeWidth={1.75} /> : <Plus size={14} strokeWidth={1.75} />}
+              label={t(source.kind === 'staged' ? 'workspace.review.unstageAll' : 'workspace.review.stageAll')}
+              size="sm"
+              tone="muted"
+              disabled={entry.stale || entry.loading}
+              data-testid="workspace-review-toolbar-stage-all"
+              onClick={() => {
+                const paths = source.kind === 'staged'
+                  ? files.map((file) => file.path)
+                  : files.filter((file) => !untracked.has(file.path)).map((file) => file.path)
+                void runWrite(source.kind === 'staged' ? 'unstage' : 'stage', paths)
+              }}
+            />
+          ) : null}
           {source.kind !== 'turn' && entry.status?.state === 'ok' && files.length > 0 ? (
             <>
               <IconButton
